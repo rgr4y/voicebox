@@ -28,7 +28,7 @@ from .database import get_db, Generation as DBGeneration, VoiceProfile as DBVoic
 from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
-from .platform_detect import get_backend_type
+from .platform_detect import get_backend_type, get_optimal_whisper_model
 
 app = FastAPI(
     title="voicebox API",
@@ -801,28 +801,49 @@ async def transcribe_audio(
     language: Optional[str] = Form(None),
 ):
     """Transcribe audio file to text."""
+    import traceback
+    
+    print(f"[Transcribe] Received file: {file.filename}, content_type: {file.content_type}")
+    
     # Save uploaded file to temporary location
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
     
+    print(f"[Transcribe] Saved to temp file: {tmp_path}, size: {len(content)} bytes")
+    
     try:
         # Get audio duration
         from .utils.audio import load_audio
+        print(f"[Transcribe] Loading audio from {tmp_path}")
         audio, sr = load_audio(tmp_path)
         duration = len(audio) / sr
+        print(f"[Transcribe] Audio loaded: {len(audio)} samples, {sr}Hz, {duration:.2f}s")
         
         # Transcribe
         whisper_model = transcribe.get_whisper_model()
 
-        # Check if Whisper model is downloaded (uses default size "base")
+        # Check if Whisper model is downloaded
         model_size = whisper_model.model_size
-        model_name = f"openai/whisper-{model_size}"
+        print(f"[Transcribe] Using whisper model size: {model_size}")
+        
+        # Get the correct model path based on backend type
+        backend_type = get_backend_type()
+        if backend_type == "mlx":
+            from .backends.mlx_backend import MLXSTTBackend
+            mlx_whisper_map = MLXSTTBackend.get_mlx_whisper_model_map()
+            model_repo_id = mlx_whisper_map.get(model_size, f"mlx-community/whisper-{model_size}-mlx")
+        else:
+            model_repo_id = f"openai/whisper-{model_size}"
+
+        print(f"[Transcribe] Model repo ID: {model_repo_id}")
 
         # Check if model is cached
         from huggingface_hub import constants as hf_constants
-        repo_cache = Path(hf_constants.HF_HUB_CACHE) / ("models--" + model_name.replace("/", "--"))
+        repo_cache = Path(hf_constants.HF_HUB_CACHE) / ("models--" + model_repo_id.replace("/", "--"))
+        print(f"[Transcribe] Checking cache at: {repo_cache}, exists: {repo_cache.exists()}")
+        
         if not repo_cache.exists():
             # Start download in background
             progress_model_name = f"whisper-{model_size}"
@@ -831,6 +852,8 @@ async def transcribe_audio(
                 try:
                     await whisper_model.load_model_async(model_size)
                 except Exception as e:
+                    print(f"[Transcribe] Background download error: {e}")
+                    traceback.print_exc()
                     get_task_manager().error_download(progress_model_name, str(e))
 
             get_task_manager().start_download(progress_model_name)
@@ -846,14 +869,20 @@ async def transcribe_audio(
                 }
             )
 
+        print(f"[Transcribe] Starting transcription...")
         text = await whisper_model.transcribe(tmp_path, language)
+        print(f"[Transcribe] Transcription complete: {text[:100] if text else '(empty)'}...")
         
         return models.TranscriptionResponse(
             text=text,
             duration=duration,
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"[Transcribe] ERROR: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         # Clean up temp file
@@ -1192,11 +1221,14 @@ async def get_model_status():
     if backend_type == "mlx":
         tts_1_7b_id = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16"
         tts_0_6b_id = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16"  # Fallback to 1.7B
-        # MLX backend uses openai/whisper-* models, not mlx-community
-        whisper_base_id = "openai/whisper-base"
-        whisper_small_id = "openai/whisper-small"
-        whisper_medium_id = "openai/whisper-medium"
-        whisper_large_id = "openai/whisper-large"
+        # MLX backend uses mlx-community Whisper models
+        from .backends.mlx_backend import MLXSTTBackend
+        mlx_whisper_map = MLXSTTBackend.get_mlx_whisper_model_map()
+        whisper_base_id = mlx_whisper_map["base"]
+        whisper_small_id = mlx_whisper_map["small"]
+        whisper_medium_id = mlx_whisper_map["medium"]
+        whisper_large_id = mlx_whisper_map["large"]
+        whisper_large_v3_turbo_id = mlx_whisper_map["large-v3-turbo"]
     else:
         tts_1_7b_id = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
         tts_0_6b_id = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
@@ -1204,6 +1236,10 @@ async def get_model_status():
         whisper_small_id = "openai/whisper-small"
         whisper_medium_id = "openai/whisper-medium"
         whisper_large_id = "openai/whisper-large"
+        whisper_large_v3_turbo_id = "openai/whisper-large-v3-turbo"
+    
+    # Get optimal whisper model for this hardware
+    optimal_whisper = get_optimal_whisper_model()
     
     model_configs = [
         {
@@ -1247,6 +1283,13 @@ async def get_model_status():
             "hf_repo_id": whisper_large_id,
             "model_size": "large",
             "check_loaded": lambda: check_whisper_loaded("large"),
+        },
+        {
+            "model_name": "whisper-large-v3-turbo",
+            "display_name": "Whisper Large V3 Turbo" + (" (Recommended)" if optimal_whisper == "large-v3-turbo" else ""),
+            "hf_repo_id": whisper_large_v3_turbo_id,
+            "model_size": "large-v3-turbo",
+            "check_loaded": lambda: check_whisper_loaded("large-v3-turbo"),
         },
     ]
     
@@ -1431,6 +1474,10 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
             "model_size": "large",
             "load_func": lambda: transcribe.get_whisper_model().load_model("large"),
         },
+        "whisper-large-v3-turbo": {
+            "model_size": "large-v3-turbo",
+            "load_func": lambda: transcribe.get_whisper_model().load_model("large-v3-turbo"),
+        },
     }
     
     if request.model_name not in model_configs:
@@ -1446,8 +1493,13 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
             # If it's a coroutine, await it
             if asyncio.iscoroutine(result):
                 await result
+            # Mark progress as complete - this notifies SSE listeners
+            # This is needed because _load_model_sync only marks complete if
+            # the model wasn't already cached, but we always init progress here
+            progress_manager.mark_complete(request.model_name)
             task_manager.complete_download(request.model_name)
         except Exception as e:
+            progress_manager.mark_error(request.model_name, str(e))
             task_manager.error_download(request.model_name, str(e))
 
     # Start tracking download

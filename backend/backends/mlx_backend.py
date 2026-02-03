@@ -2,6 +2,11 @@
 MLX backend implementation for TTS and STT using mlx-audio.
 """
 
+import warnings
+# Suppress upstream tokenizer warnings from mlx-audio/transformers
+warnings.filterwarnings("ignore", message="You are using a model of type.*to instantiate a model of type")
+warnings.filterwarnings("ignore", message=".*incorrect regex pattern.*fix_mistral_regex.*")
+
 from typing import Optional, List, Tuple
 import asyncio
 import numpy as np
@@ -13,6 +18,7 @@ from ..utils.audio import normalize_audio, load_audio
 from ..utils.progress import get_progress_manager
 from ..utils.hf_progress import HFProgressTracker, create_hf_progress_callback
 from ..utils.tasks import get_task_manager
+from ..platform_detect import get_optimal_whisper_model
 
 
 class MLXTTSBackend:
@@ -324,26 +330,38 @@ class MLXTTSBackend:
                 mx.random.seed(seed)
             
             # Extract voice prompt info
-            ref_audio = voice_prompt.get("ref_audio") or voice_prompt.get("ref_audio_path")
+            ref_audio_path = voice_prompt.get("ref_audio") or voice_prompt.get("ref_audio_path")
             ref_text = voice_prompt.get("ref_text", "")
+            ref_audio = None
             
-            # Validate that the audio file exists
-            if ref_audio and not Path(ref_audio).exists():
-                print(f"Warning: Audio file not found: {ref_audio}")
+            # Validate that the audio file exists and load it
+            if ref_audio_path and Path(ref_audio_path).exists():
+                try:
+                    # Load audio as array - model.generate expects mx.array, not numpy
+                    # Qwen3-TTS uses 24kHz sample rate
+                    import mlx.core as mx
+                    ref_audio_data, _ = load_audio(ref_audio_path, sample_rate=24000)
+                    # Convert to mx.array - the model expects this format
+                    ref_audio = mx.array(np.array(ref_audio_data, dtype=np.float32))
+                    print(f"Loaded reference audio: {ref_audio.shape} samples")
+                except Exception as e:
+                    print(f"Warning: Failed to load reference audio: {e}")
+                    ref_audio = None
+            elif ref_audio_path:
+                print(f"Warning: Audio file not found: {ref_audio_path}")
                 print("This may be due to a cached voice prompt referencing a deleted temp file.")
                 print("Regenerating without voice prompt.")
-                ref_audio = None
             
             # Check if model supports voice cloning via generate method
             # MLX API may support ref_audio parameter directly
             try:
                 # Try with voice cloning parameters if supported
-                if ref_audio:
+                if ref_audio is not None:
                     # Check if generate accepts ref_audio parameter
                     import inspect
                     sig = inspect.signature(self.model.generate)
                     if "ref_audio" in sig.parameters:
-                        # Generate with voice cloning
+                        # Generate with voice cloning - pass loaded array
                         for result in self.model.generate(text, ref_audio=ref_audio, ref_text=ref_text):
                             audio_chunks.append(np.array(result.audio))
                             sample_rate = result.sample_rate
@@ -360,6 +378,8 @@ class MLXTTSBackend:
             except Exception as e:
                 # If voice cloning fails, try without it
                 print(f"Warning: Voice cloning failed, generating without voice prompt: {e}")
+                import traceback
+                traceback.print_exc()
                 for result in self.model.generate(text):
                     audio_chunks.append(np.array(result.audio))
                     sample_rate = result.sample_rate
@@ -382,13 +402,57 @@ class MLXTTSBackend:
 class MLXSTTBackend:
     """MLX-based STT backend using mlx-audio Whisper."""
     
-    def __init__(self, model_size: str = "base"):
+    def __init__(self, model_size: Optional[str] = None):
         self.model = None
+        # Auto-detect optimal model if not specified
+        if model_size is None:
+            model_size = get_optimal_whisper_model()
         self.model_size = model_size
+        self._current_model_size = None
     
     def is_loaded(self) -> bool:
         """Check if model is loaded."""
         return self.model is not None
+    
+    @staticmethod
+    def get_mlx_whisper_model_map() -> dict:
+        """
+        Get the mapping of model sizes to MLX model IDs.
+        
+        Returns:
+            Dictionary mapping model size to HuggingFace model ID
+        """
+        # Use the new ASR-specific models that work with mlx_audio.stt.load()
+        return {
+            "tiny": "mlx-community/whisper-tiny-asr-fp16",
+            "base": "mlx-community/whisper-base-asr-fp16",
+            "small": "mlx-community/whisper-small-asr-fp16",
+            "medium": "mlx-community/whisper-medium-asr-fp16",
+            "large": "mlx-community/whisper-large-asr-fp16",
+            "large-v2": "mlx-community/whisper-large-v2-asr-fp16",
+            "large-v3": "mlx-community/whisper-large-v3-asr-fp16",
+            "large-v3-turbo": "mlx-community/whisper-large-v3-turbo-asr-fp16",
+        }
+    
+    def _get_model_path(self, model_size: str) -> str:
+        """
+        Get the MLX Whisper model path.
+        
+        Args:
+            model_size: Model size (tiny, base, small, medium, large, large-v2, large-v3, large-v3-turbo)
+            
+        Returns:
+            HuggingFace Hub model ID for MLX Whisper
+        """
+        mlx_model_map = self.get_mlx_whisper_model_map()
+        
+        if model_size not in mlx_model_map:
+            raise ValueError(f"Unknown Whisper model size: {model_size}. Available sizes: {list(mlx_model_map.keys())}")
+        
+        hf_model_id = mlx_model_map[model_size]
+        print(f"Will download MLX Whisper model from HuggingFace Hub: {hf_model_id}")
+        
+        return hf_model_id
     
     def _is_model_cached(self, model_size: str) -> bool:
         """
@@ -402,8 +466,8 @@ class MLXSTTBackend:
         """
         try:
             from huggingface_hub import constants as hf_constants
-            model_name = f"openai/whisper-{model_size}"
-            repo_cache = Path(hf_constants.HF_HUB_CACHE) / ("models--" + model_name.replace("/", "--"))
+            model_path = self._get_model_path(model_size)
+            repo_cache = Path(hf_constants.HF_HUB_CACHE) / ("models--" + model_path.replace("/", "--"))
             
             if not repo_cache.exists():
                 return False
@@ -436,13 +500,18 @@ class MLXSTTBackend:
         Lazy load the MLX Whisper model.
         
         Args:
-            model_size: Model size (tiny, base, small, medium, large)
+            model_size: Model size (tiny, base, small, medium, large, large-v2, large-v3, large-v3-turbo)
         """
         if model_size is None:
             model_size = self.model_size
         
-        if self.model is not None and self.model_size == model_size:
+        # If already loaded with correct size, return
+        if self.model is not None and self._current_model_size == model_size:
             return
+        
+        # Unload existing model if different size requested
+        if self.model is not None and self._current_model_size != model_size:
+            self.unload_model()
         
         # Run blocking load in thread pool
         await asyncio.to_thread(self._load_model_sync, model_size)
@@ -453,6 +522,9 @@ class MLXSTTBackend:
     def _load_model_sync(self, model_size: str):
         """Synchronous model loading."""
         try:
+            # Get model path BEFORE importing mlx_audio
+            model_path = self._get_model_path(model_size)
+            
             progress_manager = get_progress_manager()
             task_manager = get_task_manager()
             progress_model_name = f"whisper-{model_size}"
@@ -470,11 +542,8 @@ class MLXSTTBackend:
             tracker_context = tracker.patch_download()
             tracker_context.__enter__()
 
-            # Import mlx_audio
-            from mlx_audio.stt import load
-
-            # MLX Whisper uses the standard OpenAI models
-            model_name = f"openai/whisper-{model_size}"
+            # Import Whisper model class directly (generic load() doesn't support whisper)
+            from mlx_audio.stt.models.whisper import Model as Whisper
 
             print(f"Loading MLX Whisper model {model_size}...")
 
@@ -492,9 +561,9 @@ class MLXSTTBackend:
                     status="downloading",
                 )
 
-            # Load the model (tqdm is patched, but filters out non-download progress)
+            # Load the model using from_pretrained (not generic load())
             try:
-                self.model = load(model_name)
+                self.model = Whisper.from_pretrained(model_path)
             finally:
                 # Exit the patch context
                 tracker_context.__exit__(None, None, None)
@@ -504,6 +573,7 @@ class MLXSTTBackend:
                 progress_manager.mark_complete(progress_model_name)
                 task_manager.complete_download(progress_model_name)
             
+            self._current_model_size = model_size
             self.model_size = model_size
             
             print(f"MLX Whisper model {model_size} loaded successfully")
@@ -530,6 +600,7 @@ class MLXSTTBackend:
         if self.model is not None:
             del self.model
             self.model = None
+            self._current_model_size = None
             print("MLX Whisper model unloaded")
     
     async def transcribe(
@@ -551,13 +622,23 @@ class MLXSTTBackend:
 
         def _transcribe_sync():
             """Run synchronous transcription in thread pool."""
+            import numpy as np
+            
+            # Load audio ourselves to handle any format (mp3, wav, etc.)
+            # Whisper expects 16kHz mono audio
+            audio, sr = load_audio(audio_path, sample_rate=16000)
+            
+            # Ensure it's a numpy array (model.generate expects numpy or mx.array)
+            if not isinstance(audio, np.ndarray):
+                audio = np.array(audio)
+            
             # MLX Whisper transcription using generate method
-            # The generate method accepts audio path directly
             decode_options = {}
             if language:
                 decode_options["language"] = language
 
-            result = self.model.generate(str(audio_path), **decode_options)
+            # Pass audio array instead of path to avoid format detection issues
+            result = self.model.generate(audio, **decode_options)
 
             # Extract text from result
             if isinstance(result, str):

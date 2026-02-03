@@ -10,6 +10,8 @@ import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
 import { useGenerationStore } from '@/stores/generationStore';
 import { usePlayerStore } from '@/stores/playerStore';
 
+const usePlayerReset = () => usePlayerStore((state) => state.reset);
+
 const generationSchema = z.object({
   text: z.string().min(1, 'Text is required').max(5000),
   language: z.enum(LANGUAGE_CODES as [LanguageCode, ...LanguageCode[]]),
@@ -29,6 +31,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
   const { toast } = useToast();
   const generation = useGeneration();
   const setAudioWithAutoPlay = usePlayerStore((state) => state.setAudioWithAutoPlay);
+  const resetPlayer = usePlayerReset();
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
   const [downloadingModelName, setDownloadingModelName] = useState<string | null>(null);
   const [downloadingDisplayName, setDownloadingDisplayName] = useState<string | null>(null);
@@ -66,6 +69,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
 
     try {
       setIsGenerating(true);
+      resetPlayer(); // Close any existing audio player
 
       const modelName = `qwen-tts-${data.modelSize}`;
       const displayName = data.modelSize === '1.7B' ? 'Qwen TTS 1.7B' : 'Qwen TTS 0.6B';
