@@ -73,25 +73,6 @@ def get_system_memory_gb() -> Optional[float]:
     return None
 
 
-def get_optimal_whisper_model() -> str:
-    """
-    Determine the optimal Whisper model size based on hardware.
-    
-    Returns:
-        Recommended model size string
-    """
-    model_id = get_mac_model_identifier()
-    ram_gb = get_system_memory_gb()
-    
-    # Mac Mini M4 (Mac16,10) with 16GB+ RAM -> use large-v3-turbo
-    if model_id == "Mac16,10" and ram_gb is not None and ram_gb >= 16:
-        print(f"Detected Mac Mini M4 with {ram_gb:.1f}GB RAM, using large-v3-turbo")
-        return "large-v3-turbo"
-    
-    # Default fallback
-    return "base"
-
-
 def get_backend_type() -> Literal["mlx", "pytorch"]:
     """
     Detect the best backend for the current platform.

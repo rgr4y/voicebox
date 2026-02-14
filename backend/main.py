@@ -28,7 +28,7 @@ from .database import get_db, Generation as DBGeneration, VoiceProfile as DBVoic
 from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
-from .platform_detect import get_backend_type, get_optimal_whisper_model
+from .platform_detect import get_backend_type
 
 app = FastAPI(
     title="voicebox API",
@@ -1238,9 +1238,6 @@ async def get_model_status():
         whisper_large_id = "openai/whisper-large"
         whisper_large_v3_turbo_id = "openai/whisper-large-v3-turbo"
     
-    # Get optimal whisper model for this hardware
-    optimal_whisper = get_optimal_whisper_model()
-    
     model_configs = [
         {
             "model_name": "qwen-tts-1.7B",
@@ -1286,7 +1283,7 @@ async def get_model_status():
         },
         {
             "model_name": "whisper-large-v3-turbo",
-            "display_name": "Whisper Large V3 Turbo" + (" (Recommended)" if optimal_whisper == "large-v3-turbo" else ""),
+            "display_name": "Whisper Large V3 Turbo",
             "hf_repo_id": whisper_large_v3_turbo_id,
             "model_size": "large-v3-turbo",
             "check_loaded": lambda: check_whisper_loaded("large-v3-turbo"),

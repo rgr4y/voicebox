@@ -18,7 +18,6 @@ from ..utils.audio import normalize_audio, load_audio
 from ..utils.progress import get_progress_manager
 from ..utils.hf_progress import HFProgressTracker, create_hf_progress_callback
 from ..utils.tasks import get_task_manager
-from ..platform_detect import get_optimal_whisper_model
 
 
 class MLXTTSBackend:
@@ -404,9 +403,8 @@ class MLXSTTBackend:
     
     def __init__(self, model_size: Optional[str] = None):
         self.model = None
-        # Auto-detect optimal model if not specified
         if model_size is None:
-            model_size = get_optimal_whisper_model()
+            model_size = "base"
         self.model_size = model_size
         self._current_model_size = None
     
