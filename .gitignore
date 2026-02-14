@@ -40,6 +40,7 @@ data/generations/*
 data/projects/*
 data/voicebox.db
 data/huggingface
+data/model_prefs.json
 !data/.gitkeep
 
 # Logs
