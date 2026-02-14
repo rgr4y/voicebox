@@ -5,6 +5,9 @@ This module provides an entry point that works with PyInstaller by using
 absolute imports instead of relative imports.
 """
 
+import multiprocessing
+multiprocessing.freeze_support()
+
 import sys
 import logging
 
