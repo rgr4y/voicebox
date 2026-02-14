@@ -151,21 +151,24 @@ def validate_and_normalize_reference_audio(
     audio_path: str,
     min_duration: float = 2.0,
     max_duration: float = 30.0,
+    trim_threshold: float = 45.0,
     min_rms: float = 0.01,
 ) -> Tuple[bool, Optional[str]]:
     """
-    Validate and normalize reference audio for voice cloning.
+    Validate, auto-trim, and normalize reference audio for voice cloning.
 
-    Checks duration and silence, then normalizes the audio in-place
-    (overwrites the file) to consistent loudness. This replaces the
-    previous approach of rejecting audio that exceeded a peak threshold,
-    which was too aggressive and rejected legitimate recordings.
+    Does the heavy lifting so users don't have to manually prepare audio:
+    - Clips slightly over max_duration are auto-trimmed (up to trim_threshold)
+    - Audio is loudness-normalized to broadcast standards (EBU R128)
+    - The old peak > 0.99 "clipping" rejection is gone entirely
 
     Args:
-        audio_path: Path to audio file (will be overwritten with normalized version)
+        audio_path: Path to audio file (will be overwritten with processed version)
         min_duration: Minimum duration in seconds
-        max_duration: Maximum duration in seconds
-        min_rms: Minimum RMS level
+        max_duration: Maximum duration in seconds (inclusive — 30.0s is allowed)
+        trim_threshold: Auto-trim clips up to this length to max_duration.
+            Clips longer than this are rejected outright.
+        min_rms: Minimum RMS level (below this = silence)
 
     Returns:
         Tuple of (is_valid, error_message)
@@ -175,23 +178,36 @@ def validate_and_normalize_reference_audio(
         duration = len(audio) / sr
 
         if duration < min_duration:
-            return False, f"Audio too short (minimum {min_duration} seconds)"
+            return False, f"Audio too short ({duration:.1f}s, minimum {min_duration}s)"
+
+        # Auto-trim clips that are over max_duration but within trim_threshold
         if duration > max_duration:
-            return False, f"Audio too long (maximum {max_duration} seconds)"
+            if duration <= trim_threshold:
+                # Trim to max_duration — take the first N seconds
+                max_samples = int(max_duration * sr)
+                audio = audio[:max_samples]
+                logger.info(
+                    "Auto-trimmed reference audio from %.1fs to %.1fs",
+                    duration, max_duration,
+                )
+                duration = max_duration
+            else:
+                return False, (
+                    f"Audio too long ({duration:.1f}s, maximum {max_duration}s). "
+                    f"Clips up to {trim_threshold:.0f}s are auto-trimmed."
+                )
 
         rms = np.sqrt(np.mean(audio ** 2))
         if rms < min_rms:
             return False, "Audio is too quiet or silent"
 
-        # Normalize the reference audio to consistent loudness instead of
-        # rejecting it for "clipping". The old check (peak > 0.99) was too
-        # strict and rejected most real-world recordings.
+        # Normalize to consistent loudness (EBU R128, -16 LUFS)
         audio = normalize_audio(audio, sample_rate=sr)
         sf.write(audio_path, audio, sr)
 
         return True, None
     except Exception as e:
-        return False, f"Error validating audio: {str(e)}"
+        return False, f"Error processing audio: {str(e)}"
 
 
 # Keep old name as alias for backward compatibility
