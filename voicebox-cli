@@ -216,43 +216,95 @@ def api_multipart_or_error(base_url, path, fields, file_field_name, file_path, t
 
 
 def normalize_audio_sample(input_path, gain_db=0.0):
-    """Create a normalized mono WAV from input_path. Returns temp Path."""
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError("ffmpeg is not installed; cannot auto-normalize clipping")
+    """Create a normalized mono WAV from input_path. Returns temp Path.
 
+    Uses pyloudnorm (EBU R128 LUFS) if available, falls back to ffmpeg,
+    then falls back to a simple stdlib peak-normalization.
+    """
     fd, temp_name = tempfile.mkstemp(prefix="voicebox-normalized-", suffix=".wav")
     os.close(fd)
     out_path = Path(temp_name)
 
-    # loudnorm + limiter reduces clipping; configurable gain_db handles strict detectors.
-    filter_chain = "loudnorm=I=-16:TP=-2:LRA=11,alimiter=limit=-2dB"
-    if gain_db != 0:
-        sign = "+" if gain_db > 0 else ""
-        filter_chain = f"{filter_chain},volume={sign}{gain_db}dB"
+    # --- Try pyloudnorm (pure Python, best quality) ---
+    try:
+        import numpy as np
+        import soundfile as _sf
+        import pyloudnorm as pyln
 
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(input_path),
-        "-af",
-        filter_chain,
-        "-ac",
-        "1",
-        "-ar",
-        "24000",
-        str(out_path),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
+        audio, sr = _sf.read(str(input_path))
+        # Convert to mono if stereo
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32)
+
+        # Resample to 24kHz if needed
+        if sr != 24000:
+            try:
+                import librosa
+                audio = librosa.resample(audio, orig_sr=sr, target_sr=24000)
+                sr = 24000
+            except ImportError:
+                pass  # Keep original sample rate
+
+        # LUFS normalization (matching ffmpeg loudnorm=I=-16:TP=-2)
+        meter = pyln.Meter(sr)
+        current_lufs = meter.integrated_loudness(audio)
+        if np.isfinite(current_lufs) and current_lufs > -70:
+            target_lufs = -16.0 + gain_db
+            audio = pyln.normalize.loudness(audio, current_lufs, target_lufs)
+
+        # True-peak limiting at -2 dBTP
+        peak_limit = 10 ** (-2.0 / 20)
+        audio = np.clip(audio, -peak_limit, peak_limit)
+
+        _sf.write(str(out_path), audio, sr)
+        return out_path
+    except ImportError:
+        pass  # pyloudnorm or soundfile not available
+
+    # --- Fallback: ffmpeg ---
+    if shutil.which("ffmpeg"):
+        filter_chain = "loudnorm=I=-16:TP=-2:LRA=11,alimiter=limit=-2dB"
+        if gain_db != 0:
+            sign = "+" if gain_db > 0 else ""
+            filter_chain = f"{filter_chain},volume={sign}{gain_db}dB"
+
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(input_path), "-af", filter_chain,
+            "-ac", "1", "-ar", "24000", str(out_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode == 0:
+            return out_path
         out_path.unlink(missing_ok=True)
-        err = (proc.stderr or proc.stdout or "ffmpeg normalization failed").strip()
-        raise RuntimeError(err.splitlines()[0] if err else "ffmpeg normalization failed")
 
-    return out_path
+    # --- Last resort: simple WAV peak normalization (stdlib only) ---
+    try:
+        import wave
+        import struct
+
+        with wave.open(str(input_path), "rb") as wf:
+            params = wf.getparams()
+            frames = wf.readframes(params.nframes)
+
+        if params.sampwidth == 2:
+            fmt = f"<{params.nframes * params.nchannels}h"
+            samples = list(struct.unpack(fmt, frames))
+            peak = max(abs(s) for s in samples) or 1
+            target = int(32767 * 0.79)  # ~-2 dBTP
+            gain = target / peak
+            samples = [max(-32768, min(32767, int(s * gain))) for s in samples]
+
+            with wave.open(str(out_path), "wb") as wf_out:
+                wf_out.setparams(params)
+                wf_out.writeframes(struct.pack(fmt, *samples))
+            return out_path
+    except Exception:
+        pass
+
+    out_path.unlink(missing_ok=True)
+    raise RuntimeError("Cannot normalize audio: install pyloudnorm or ffmpeg")
 
 
 def print_model_used(label, used_model):
@@ -263,54 +315,52 @@ def print_model_used(label, used_model):
 
 
 def upload_profile_sample_with_retry(base_url, profile_id, sample_path, reference_text, timeout):
-    """Upload sample and retry with progressively attenuated normalized audio on clipping."""
-    upload_candidates = [sample_path]
-    normalized_paths = []
-    # Progressively reduce gain for strict clipping validators.
-    for gain_db in (0.0, -6.0, -12.0, -18.0):
-        try:
-            normalized = normalize_audio_sample(sample_path, gain_db=gain_db)
-            normalized_paths.append(normalized)
-            upload_candidates.append(normalized)
-        except RuntimeError:
-            break
+    """Upload sample, normalizing first for best quality.
 
+    The backend now normalizes on its own, so this is belt-and-suspenders.
+    If the initial upload fails with a clipping error (older servers),
+    retries once with a locally normalized copy.
+    """
+    normalized_path = None
     try:
-        for idx, candidate in enumerate(upload_candidates):
-            if idx == 1:
-                print(
-                    "Server reported clipping in sample; trying normalized audio...",
-                    file=sys.stderr,
-                )
-            elif idx > 1:
-                gain_steps = ("-6dB", "-12dB", "-18dB")
-                step_label = gain_steps[min(idx - 2, len(gain_steps) - 1)]
-                print(
-                    f"Clipping still detected; retrying with extra attenuation ({step_label})...",
-                    file=sys.stderr,
-                )
+        # First attempt: upload original
+        try:
+            _, sample = api_multipart_or_error(
+                base_url,
+                f"/profiles/{profile_id}/samples",
+                fields={"reference_text": reference_text},
+                file_field_name="file",
+                file_path=sample_path,
+                timeout=timeout,
+            )
+            return sample
+        except ApiRequestError as e:
+            detail_lower = str(e.detail).lower()
+            is_clipping = e.status_code == 400 and "clipping" in detail_lower
+            if not is_clipping:
+                raise
 
-            try:
-                _, sample = api_multipart_or_error(
-                    base_url,
-                    f"/profiles/{profile_id}/samples",
-                    fields={"reference_text": reference_text},
-                    file_field_name="file",
-                    file_path=candidate,
-                    timeout=timeout,
-                )
-                if idx > 0:
-                    print("Retry succeeded with normalized audio.", file=sys.stderr)
-                return sample
-            except ApiRequestError as e:
-                detail_lower = str(e.detail).lower()
-                is_clipping = e.status_code == 400 and "clipping" in detail_lower
-                has_more_attempts = idx < len(upload_candidates) - 1
-                if not (is_clipping and has_more_attempts):
-                    raise
+        # Retry with normalized audio
+        print("Server reported clipping; normalizing and retrying...", file=sys.stderr)
+        try:
+            normalized_path = normalize_audio_sample(sample_path)
+        except RuntimeError as norm_err:
+            print(f"Warning: {norm_err}", file=sys.stderr)
+            raise e  # Re-raise original clipping error
+
+        _, sample = api_multipart_or_error(
+            base_url,
+            f"/profiles/{profile_id}/samples",
+            fields={"reference_text": reference_text},
+            file_field_name="file",
+            file_path=normalized_path,
+            timeout=timeout,
+        )
+        print("Retry succeeded with normalized audio.", file=sys.stderr)
+        return sample
     finally:
-        for p in normalized_paths:
-            p.unlink(missing_ok=True)
+        if normalized_path:
+            normalized_path.unlink(missing_ok=True)
 
 
 # --- Subcommands ---
