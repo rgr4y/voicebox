@@ -83,8 +83,9 @@ class ApiClient {
   }
 
   private async fetchWithTracking(url: string, options?: RequestInit): Promise<Response> {
-    markApiEmission();
     const response = await fetch(url, options);
+    // Only mark as successful API emission if the request succeeded
+    markApiEmission();
     extractHealthHeaders(response);
     return response;
   }

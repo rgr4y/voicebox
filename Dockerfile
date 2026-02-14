@@ -8,7 +8,7 @@
 # Run:
 #   docker compose up -d
 
-ARG CUDA=0
+ARG CUDA=1
 
 # --- Base stage ---
 FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04 AS base-cuda
@@ -37,29 +37,22 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 # --- Dependencies stage (cached layer) ---
 FROM base AS deps
 
+ARG CUDA
 WORKDIR /app
 
 COPY backend/requirements.txt ./requirements.txt
 
-ARG CUDA=1
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
     if [ "$CUDA" = "1" ]; then \
-        pip install --no-cache-dir torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu121; \
+        pip install --no-cache-dir torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu121 && \
+        pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121; \
     else \
-        pip install --no-cache-dir torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu; \
-    fi && \
-    pip install --no-cache-dir -r requirements.txt
+        pip install --no-cache-dir torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu && \
+        pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu; \
+    fi
 
-# --- App stage ---
-FROM deps AS app
-
-WORKDIR /app
-
-# Copy backend source as a package
-COPY backend/ /app/backend/
-
-# HuggingFace cache — models download here
-ENV HF_HOME=/app/data/huggingface
+# Source is volume-mounted at runtime
+ENV HF_HOME=/models/huggingface
 
 EXPOSE 17493
 
