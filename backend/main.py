@@ -1407,7 +1407,12 @@ async def get_model_status():
             if is_downloading:
                 downloaded = False
                 size_mb = None  # Don't show partial size during download
-            
+
+            # If no size from disk, query HuggingFace API
+            if size_mb is None and not is_downloading:
+                from .utils.hf_sizes import get_repo_size_mb
+                size_mb = await get_repo_size_mb(config["hf_repo_id"])
+
             statuses.append(models.ModelStatus(
                 model_name=config["model_name"],
                 display_name=config["display_name"],
@@ -1425,13 +1430,19 @@ async def get_model_status():
             
             # Check if this model (or its shared repo) is currently being downloaded
             is_downloading = config["hf_repo_id"] in active_download_repos
-            
+
+            # If not downloading, try to get size from HuggingFace API
+            size_mb = None
+            if not is_downloading:
+                from .utils.hf_sizes import get_repo_size_mb
+                size_mb = await get_repo_size_mb(config["hf_repo_id"])
+
             statuses.append(models.ModelStatus(
                 model_name=config["model_name"],
                 display_name=config["display_name"],
                 downloaded=False,  # Assume not downloaded if check failed
                 downloading=is_downloading,
-                size_mb=None,
+                size_mb=size_mb,
                 loaded=loaded,
             ))
     
