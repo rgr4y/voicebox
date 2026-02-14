@@ -26,11 +26,17 @@ export function MainEditor() {
   const setDialogOpen = useUIStore((state) => state.setProfileDialogOpen);
   const importProfile = useImportProfile();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [importWarningOpen, setImportWarningOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const { toast } = useToast();
 
   const handleImportClick = () => {
+    setImportWarningOpen(true);
+  };
+
+  const handleImportProceed = () => {
+    setImportWarningOpen(false);
     fileInputRef.current?.click();
   };
 
@@ -86,7 +92,7 @@ export function MainEditor() {
         {/* Fixed Header */}
         <div className="absolute top-0 left-0 right-0 z-10">
           <div className="flex items-center justify-between mb-4 px-1">
-            <h2 className="text-2xl font-bold">Voicebox</h2>
+            <h2 className="text-2xl font-bold">Voicex</h2>
             <div className="flex gap-2">
               <Button variant="outline" onClick={handleImportClick}>
                 <Upload className="mr-2 h-4 w-4" />
@@ -131,7 +137,29 @@ export function MainEditor() {
       {/* Floating Generate Box */}
       <FloatingGenerateBox isPlayerOpen={!!audioUrl} />
 
-      {/* Import Dialog */}
+      {/* Import Warning Dialog */}
+      <Dialog open={importWarningOpen} onOpenChange={setImportWarningOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Import Voice Profile</DialogTitle>
+            <DialogDescription>
+              You can only import voice profiles that were exported from another instance of Voicebox.
+              The file must be a <code className="text-xs bg-muted px-1 py-0.5 rounded">.voicebox.zip</code> file.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setImportWarningOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleImportProceed}>
+              <Upload className="mr-2 h-4 w-4" />
+              Import
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Import Confirmation Dialog */}
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
         <DialogContent>
           <DialogHeader>

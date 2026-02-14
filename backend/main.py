@@ -924,6 +924,10 @@ async def force_cancel_job(job_id: str, db: Session = Depends(get_db)):
         pass
 
     get_progress_manager().mark_error(job_id, "Force-cancelled by user")
+    
+    # Wake the job worker to process next queued job
+    _job_signal.set()
+    
     return {"status": "cancelled"}
 
 

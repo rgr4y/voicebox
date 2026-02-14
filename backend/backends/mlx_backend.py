@@ -405,6 +405,9 @@ class MLXTTSBackend:
                     logger.debug("[TTS] Starting generation (no reference audio)")
                     _process_results(self.model.generate(text))
             except Exception as e:
+                # If cancelled or model unloaded, don't try to fall back
+                if "cancel" in str(e).lower() or self.model is None:
+                    raise
                 logger.warning(f"[TTS] Warning: Voice cloning failed, falling back to uncloned: {e}", exc_info=True)
                 audio_chunks.clear()
                 chunk_count = 0

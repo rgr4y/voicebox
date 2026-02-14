@@ -1,5 +1,6 @@
 import {
   AudioWaveform,
+  Copy,
   Download,
   FileArchive,
   Loader2,
@@ -301,12 +302,28 @@ export function HistoryTable() {
                   </div>
 
                   {/* Right side - Transcript textarea */}
-                  <div className="flex-1 min-w-0 flex">
+                  <div className="flex-1 min-w-0 flex relative group">
                     <Textarea
                       value={gen.text}
-                      className="flex-1 resize-none text-sm text-muted-foreground select-text"
+                      className="flex-1 resize-none text-sm text-muted-foreground select-text pr-10"
                       readOnly
                     />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="absolute top-1 right-1 h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity bg-background/80 hover:bg-background"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigator.clipboard.writeText(gen.text);
+                        toast({
+                          title: 'Copied to clipboard',
+                          description: 'Text copied successfully',
+                        });
+                      }}
+                      aria-label="Copy text"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </Button>
                   </div>
 
                   {/* Far right - Ellipsis actions */}
