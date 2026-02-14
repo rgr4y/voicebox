@@ -220,13 +220,13 @@ class ProgressManager:
             
             if initial_progress:
                 status = initial_progress.get('status')
-                # Only send initial progress if task is actually in progress
-                # Don't send old 'complete' or 'error' status from previous tasks
-                if status in ('downloading', 'extracting', 'generating'):
-                    logger.info(f"Sending initial progress for {model_name}: {status}")
-                    yield f"data: {json.dumps(initial_progress)}\n\n"
-                else:
-                    logger.info(f"Skipping initial progress for {model_name} (status: {status})")
+                logger.info(f"Sending initial progress for {model_name}: {status}")
+                yield f"data: {json.dumps(initial_progress)}\n\n"
+                # If already complete or error, close immediately so late
+                # subscribers still receive the terminal status
+                if status in ('complete', 'error'):
+                    logger.info(f"Download already {status} for {model_name}, closing SSE")
+                    return
             else:
                 logger.info(f"No initial progress available for {model_name}")
 

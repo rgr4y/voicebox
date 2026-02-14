@@ -43,6 +43,9 @@ import {
 } from '@/lib/hooks/useProfiles';
 import { useSystemAudioCapture } from '@/lib/hooks/useSystemAudioCapture';
 import { useTranscription } from '@/lib/hooks/useTranscription';
+import { useWhisperModelReady } from '@/lib/hooks/useWhisperModelReady';
+import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
+import { ModelDownloadingError } from '@/lib/api/client';
 import { formatAudioDuration, getAudioDuration } from '@/lib/utils/audio';
 import { usePlatform } from '@/platform/PlatformContext';
 import { useServerStore } from '@/stores/serverStore';
@@ -116,8 +119,25 @@ export function ProfileForm() {
   const uploadAvatar = useUploadAvatar();
   const deleteAvatar = useDeleteAvatar();
   const transcribe = useTranscription();
+  const { ready: whisperReady, downloading: whisperModelDownloading } = useWhisperModelReady({ enabled: open });
   const { toast } = useToast();
-  const [sampleMode, setSampleMode] = useState<'upload' | 'record' | 'system'>('record');
+  const [whisperDownloading, setWhisperDownloading] = useState<string | null>(null);
+  useModelDownloadToast({
+    modelName: whisperDownloading || '',
+    displayName: 'Downloading Whisper model',
+    enabled: !!whisperDownloading,
+    onComplete: () => setWhisperDownloading(null),
+    onError: () => setWhisperDownloading(null),
+  });
+  // Compute the transcribe button label based on model availability
+  const transcribeLabel = transcribe.isPending
+    ? 'Transcribing...'
+    : !!whisperDownloading || whisperModelDownloading
+      ? 'Downloading model...'
+      : !whisperReady
+        ? 'No model available'
+        : undefined; // undefined = use default "Transcribe"
+  const [sampleMode, setSampleMode] = useState<'upload' | 'record' | 'system'>('upload');
   const [audioDuration, setAudioDuration] = useState<number | null>(null);
   const [isValidatingAudio, setIsValidatingAudio] = useState(false);
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
@@ -314,7 +334,7 @@ export function ProfileForm() {
         referenceText: undefined,
         avatarFile: undefined,
       });
-      setSampleMode('record');
+      setSampleMode('upload');
       setAvatarPreview(null);
     }
   }, [editingProfile, profileFormDraft, open, form]);
@@ -336,6 +356,14 @@ export function ProfileForm() {
 
       form.setValue('referenceText', result.text, { shouldValidate: true });
     } catch (error) {
+      if (error instanceof ModelDownloadingError) {
+        setWhisperDownloading(error.modelName);
+        toast({
+          title: 'Whisper model downloading',
+          description: 'The transcription model is being downloaded. You can try again once it finishes.',
+        });
+        return;
+      }
       toast({
         title: 'Transcription failed',
         description: error instanceof Error ? error.message : 'Failed to transcribe audio',
@@ -632,7 +660,7 @@ export function ProfileForm() {
                       sampleFile: undefined,
                       referenceText: '',
                     });
-                    setSampleMode('record');
+                    setSampleMode('upload');
                   }}
                 >
                   <X className="h-3 w-3 mr-1" />
@@ -695,11 +723,12 @@ export function ProfileForm() {
                                 onPlayPause={handlePlayPause}
                                 isPlaying={isPlaying}
                                 isValidating={isValidatingAudio}
-                                isTranscribing={transcribe.isPending}
+                                isTranscribing={transcribe.isPending || !!whisperDownloading || !whisperReady}
                                 isDisabled={
                                   audioDuration !== null &&
                                   audioDuration > MAX_AUDIO_DURATION_SECONDS
                                 }
+                                transcribeLabel={transcribeLabel}
                                 fieldName={name}
                               />
                             )}
@@ -721,7 +750,8 @@ export function ProfileForm() {
                                 onTranscribe={handleTranscribe}
                                 onPlayPause={handlePlayPause}
                                 isPlaying={isPlaying}
-                                isTranscribing={transcribe.isPending}
+                                isTranscribing={transcribe.isPending || !!whisperDownloading || !whisperReady}
+                                transcribeLabel={transcribeLabel}
                               />
                             )}
                           />
@@ -743,7 +773,8 @@ export function ProfileForm() {
                                   onTranscribe={handleTranscribe}
                                   onPlayPause={handlePlayPause}
                                   isPlaying={isPlaying}
-                                  isTranscribing={transcribe.isPending}
+                                  isTranscribing={transcribe.isPending || !!whisperDownloading || !whisperReady}
+                                  transcribeLabel={transcribeLabel}
                                 />
                               )}
                             />

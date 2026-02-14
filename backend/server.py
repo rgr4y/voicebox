@@ -67,7 +67,9 @@ if __name__ == "__main__":
             default=None,
             help="Data directory for database, profiles, and generated audio",
         )
-        args = parser.parse_args()
+        # Use parse_known_args to tolerate extra args from multiprocessing
+        # resource tracker (-B -S -I -c ...) on PyInstaller bundles
+        args, _unknown = parser.parse_known_args()
         logger.info(f"Parsed arguments: host={args.host}, port={args.port}, data_dir={args.data_dir}")
 
         # Set data directory if provided

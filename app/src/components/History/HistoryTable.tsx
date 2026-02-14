@@ -251,8 +251,11 @@ export function HistoryTable() {
             {history.map((gen) => {
               const isCurrentlyPlaying = currentAudioId === gen.id && isPlaying;
               return (
+                // biome-ignore lint/a11y/useSemanticElements: Complex flex layout requires div wrapper
                 <div
                   key={gen.id}
+                  role="button"
+                  tabIndex={0}
                   className={cn(
                     'flex items-stretch gap-4 h-26 border rounded-md p-3 bg-card hover:bg-muted/70 transition-colors text-left w-full',
                     isCurrentlyPlaying && 'bg-muted/70',
@@ -264,6 +267,16 @@ export function HistoryTable() {
                       return;
                     }
                     handlePlay(gen.id, gen.text, gen.profile_id);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      const target = e.target as HTMLElement;
+                      if (target.closest('textarea') || window.getSelection()?.toString()) {
+                        return;
+                      }
+                      handlePlay(gen.id, gen.text, gen.profile_id);
+                    }
                   }}
                 >
                   {/* Waveform icon */}
@@ -297,8 +310,10 @@ export function HistoryTable() {
                   </div>
 
                   {/* Far right - Ellipsis actions */}
+                  {/* biome-ignore lint/a11y/noStaticElementInteractions: Event handlers prevent propagation to parent card */}
                   <div
                     className="w-10 shrink-0 flex justify-end"
+                    role="presentation"
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={(e) => e.stopPropagation()}
                   >

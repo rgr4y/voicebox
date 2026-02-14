@@ -44,9 +44,9 @@ COPY backend/requirements.txt ./requirements.txt
 ARG CUDA=1
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
     if [ "$CUDA" = "1" ]; then \
-        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121; \
+        pip install --no-cache-dir torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu121; \
     else \
-        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu; \
+        pip install --no-cache-dir torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu; \
     fi && \
     pip install --no-cache-dir -r requirements.txt
 

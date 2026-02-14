@@ -37,6 +37,7 @@ interface AudioSampleRecordingProps {
   onPlayPause: () => void;
   isPlaying: boolean;
   isTranscribing?: boolean;
+  transcribeLabel?: string;
   showWaveform?: boolean;
 }
 
@@ -51,6 +52,7 @@ export function AudioSampleRecording({
   onPlayPause,
   isPlaying,
   isTranscribing = false,
+  transcribeLabel,
   showWaveform = true,
 }: AudioSampleRecordingProps) {
   const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
@@ -150,7 +152,7 @@ export function AudioSampleRecording({
                   className="flex items-center gap-2"
                 >
                   <Mic className="h-4 w-4" />
-                  {isTranscribing ? 'Transcribing...' : 'Transcribe'}
+                  {transcribeLabel ?? (isTranscribing ? 'Transcribing...' : 'Transcribe')}
                 </Button>
                 <Button
                   type="button"

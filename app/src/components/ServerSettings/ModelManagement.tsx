@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, Loader2, Trash2 } from 'lucide-react';
+import { Download, Loader2, Trash2, X } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import {
   AlertDialog,
@@ -47,7 +47,19 @@ export function ModelManagement() {
     console.log('[ModelManagement] Download error, clearing state');
     setDownloadingModel(null);
     setDownloadingDisplayName(null);
-  }, []);
+    queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
+  }, [queryClient]);
+
+  const handleCancel = async (modelName: string) => {
+    try {
+      await apiClient.cancelModelDownload(modelName);
+    } catch {
+      // Ignore errors — the download may have already finished
+    }
+    setDownloadingModel(null);
+    setDownloadingDisplayName(null);
+    queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
+  };
 
   // Use progress toast hook for the downloading model
   useModelDownloadToast({
@@ -179,6 +191,7 @@ export function ModelManagement() {
                         setDeleteDialogOpen(true);
                       }}
                       isDownloading={downloadingModel === model.model_name}
+                      onCancel={() => handleCancel(model.model_name)}
                       formatSize={formatSize}
                     />
                   ))}
@@ -207,6 +220,7 @@ export function ModelManagement() {
                         setDeleteDialogOpen(true);
                       }}
                       isDownloading={downloadingModel === model.model_name}
+                      onCancel={() => handleCancel(model.model_name)}
                       formatSize={formatSize}
                     />
                   ))}
@@ -271,11 +285,12 @@ interface ModelItemProps {
   };
   onDownload: () => void;
   onDelete: () => void;
+  onCancel: () => void;
   isDownloading: boolean;  // Local state - true if user just clicked download
   formatSize: (sizeMb?: number) => string;
 }
 
-function ModelItem({ model, onDownload, onDelete, isDownloading, formatSize }: ModelItemProps) {
+function ModelItem({ model, onDownload, onDelete, onCancel, isDownloading, formatSize }: ModelItemProps) {
   // Use server's downloading state OR local state (for immediate feedback before server updates)
   const showDownloading = model.downloading || isDownloading;
   
@@ -319,10 +334,15 @@ function ModelItem({ model, onDownload, onDelete, isDownloading, formatSize }: M
             </Button>
           </div>
         ) : showDownloading ? (
-          <Button size="sm" variant="outline" disabled>
-            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            Downloading...
-          </Button>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>Downloading...</span>
+            </div>
+            <Button size="sm" variant="outline" onClick={onCancel} title="Cancel download">
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         ) : (
           <Button size="sm" onClick={onDownload} variant="outline">
             <Download className="h-4 w-4 mr-2" />

@@ -68,8 +68,10 @@ def normalize_audio(
             logger.debug("Audio too quiet for LUFS normalization (%.1f LUFS)", current_lufs)
             return audio
 
-        # Apply loudness normalization
-        audio = pyln.normalize.loudness(audio, current_lufs, target_lufs)
+        # Apply loudness normalization (suppress clipping warnings — we clip intentionally below)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*Possible clipping.*")
+            audio = pyln.normalize.loudness(audio, current_lufs, target_lufs)
 
         # True-peak limiting via clipping (simple but effective for TTS output)
         audio = np.clip(audio, -peak_limit, peak_limit)

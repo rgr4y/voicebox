@@ -2,10 +2,13 @@
 HuggingFace Hub download progress tracking.
 """
 
+import logging
 from typing import Optional, Callable
 from contextlib import contextmanager
 import threading
 import sys
+
+logger = logging.getLogger(__name__)
 
 
 class HFProgressTracker:
@@ -39,7 +42,7 @@ class HFProgressTracker:
                     first_arg = args[0]
                     if isinstance(first_arg, str):
                         desc = first_arg
-                
+
                 filename = ""
                 if desc:
                     # Try to extract filename from description
@@ -48,7 +51,12 @@ class HFProgressTracker:
                         filename = desc.split(":")[0].strip()
                     else:
                         filename = desc.strip()
-                
+
+                # When model is cached, suppress all tqdm output (e.g. "Fetching 12 files")
+                # to keep the console clean on repeat startups.
+                if tracker.filter_non_downloads:
+                    kwargs['disable'] = True
+
                 # Filter out non-standard kwargs that huggingface_hub might pass
                 # These are custom kwargs that tqdm doesn't understand
                 filtered_kwargs = {}
@@ -63,7 +71,7 @@ class HFProgressTracker:
                 for key, value in kwargs.items():
                     if key in tqdm_kwargs:
                         filtered_kwargs[key] = value
-                
+
                 # Try to initialize with filtered kwargs, fall back to all kwargs if that fails
                 try:
                     super().__init__(*args, **filtered_kwargs)
@@ -276,11 +284,11 @@ class HFProgressTracker:
                     
                     hf_tqdm_class.update = patched_update
                     patched_count += 1
-                    print(f"[HFProgressTracker] Monkey-patched huggingface_hub.utils.tqdm.tqdm.update")
-            except (ImportError, AttributeError) as e:
-                print(f"[HFProgressTracker] Could not monkey-patch hf_tqdm: {e}")
-            
-            print(f"[HFProgressTracker] Patched {patched_count} tqdm references")
+            except (ImportError, AttributeError):
+                pass
+
+            if not self.filter_non_downloads:
+                logger.debug(f"[HFProgressTracker] Patched {patched_count} tqdm references")
             
             yield
             
@@ -318,6 +326,23 @@ class HFProgressTracker:
                     
                 except (ImportError, AttributeError):
                     pass
+
+
+@contextmanager
+def hf_offline_for_cached(is_cached: bool):
+    """Set HF_HUB_OFFLINE=1 when model is cached to skip remote validation ('Fetching N files')."""
+    import os
+    old = os.environ.get("HF_HUB_OFFLINE")
+    if is_cached:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+    try:
+        yield
+    finally:
+        if is_cached:
+            if old is None:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+            else:
+                os.environ["HF_HUB_OFFLINE"] = old
 
 
 def create_hf_progress_callback(model_name: str, progress_manager):

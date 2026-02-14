@@ -41,6 +41,10 @@ setup: setup-js setup-python ## Full project setup (all dependencies)
 	@echo -e "  Run $(YELLOW)make dev$(NC) to start development servers"
 
 setup-js: ## Install JavaScript dependencies (bun)
+	@command -v bun >/dev/null 2>&1 || { \
+		echo -e "$(YELLOW)bun not found — installing...$(NC)"; \
+		curl -fsSL https://bun.sh/install | bash; \
+	}
 	@echo -e "$(BLUE)Installing JavaScript dependencies...$(NC)"
 	bun install
 
@@ -72,7 +76,7 @@ setup-rust: ## Install Rust toolchain (if not present)
 # DEVELOPMENT
 # =============================================================================
 
-.PHONY: dev dev-backend dev-frontend dev-web kill-dev
+.PHONY: dev dev-backend dev-backend-watch dev-frontend dev-web kill-dev
 
 dev: ## Start backend + desktop app (parallel)
 	@echo -e "$(BLUE)Starting development servers...$(NC)"
@@ -82,9 +86,11 @@ dev: ## Start backend + desktop app (parallel)
 		sleep 2 && $(MAKE) dev-frontend & \
 		wait
 
-dev-backend: ## Start FastAPI backend server
+dev-backend: dev-backend-watch ## Start FastAPI backend server (venv-verified, auto-reload)
+
+dev-backend-watch: ## Start backend with venv verification + Python file watching
 	@echo -e "$(BLUE)Starting backend server on http://localhost:17493$(NC)"
-	$(VENV_BIN)/uvicorn backend.main:app --reload --port 17493
+	./scripts/dev-backend-watch.sh
 
 dev-frontend: ## Start Tauri desktop app
 	@echo -e "$(BLUE)Starting Tauri desktop app...$(NC)"

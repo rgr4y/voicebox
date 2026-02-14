@@ -16,6 +16,7 @@ import mimetypes
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -365,6 +366,68 @@ def upload_profile_sample_with_retry(base_url, profile_id, sample_path, referenc
 
 # --- Subcommands ---
 
+def _file_starts_with_python_shebang(path):
+    """Check if a file starts with a Python shebang line."""
+    try:
+        with open(path, "rb") as f:
+            first_line = f.readline(120)
+            return first_line.startswith(b"#!") and b"python" in first_line
+    except Exception:
+        return False
+
+
+def _find_venv_python(project_dir):
+    """Find the venv Python interpreter for a project directory.
+
+    Checks common venv locations (backend/venv, .venv, venv) and returns the
+    Python path if found and working, else falls back to sys.executable.
+    """
+    candidates = [
+        Path(project_dir) / "backend" / "venv" / "bin" / "python",
+        Path(project_dir) / ".venv" / "bin" / "python",
+        Path(project_dir) / "venv" / "bin" / "python",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            try:
+                subprocess.run(
+                    [str(candidate), "-c", "import sys"],
+                    capture_output=True, timeout=5,
+                )
+                return str(candidate)
+            except Exception:
+                continue
+    return sys.executable
+
+
+def _check_port_in_use(port):
+    """Check if something is already listening on the given port.
+
+    Returns:
+        "voicebox"  — a voicebox server is responding on that port
+        "occupied"  — something else is listening on that port
+        None        — port is free
+    """
+    port = int(port)
+    # Quick socket probe
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        sock.connect(("127.0.0.1", port))
+        sock.close()
+    except (ConnectionRefusedError, OSError):
+        return None  # Port is free
+
+    # Port is occupied — check if it's a voicebox server
+    try:
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+        if r.status == 200:
+            return "voicebox"
+    except Exception:
+        pass
+    return "occupied"
+
+
 def cmd_server(args):
     """Start the backend server (no frontend)."""
     data_dir = args.data_dir or str(DEFAULT_DATA_DIR)
@@ -374,15 +437,78 @@ def cmd_server(args):
         _stop_server()
         return
 
-    if Path(SERVER_BIN).exists():
+    # Handle --server-path: save to config if provided
+    config = load_cli_config()
+    if args.server_path:
+        resolved = str(Path(args.server_path).resolve())
+        config["server_path"] = resolved
+        save_cli_config(config)
+        print(f"Saved server path: {resolved}")
+
+    # Check if something is already running on the target port
+    port_status = _check_port_in_use(port)
+    if port_status == "voicebox":
+        print(f"Voicebox server already running on port {port}.")
+        return
+    elif port_status == "occupied":
+        print(f"Error: port {port} is already in use by another process.", file=sys.stderr)
+        print(f"Either stop the process or use a different port: voicebox server --port <port>", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve server binary (in priority order):
+    #   1. --server-path flag or saved config
+    #   2. ./backend/main.py in cwd (local dev checkout)
+    #   3. /Applications/Voicebox.app bundle
+    #   4. voicebox-server on PATH
+    #   5. python -m backend.main from CLI's own directory
+    custom_server = args.server_path or config.get("server_path")
+    local_backend = Path.cwd() / "backend" / "main.py"
+
+    if custom_server:
+        custom_path = Path(custom_server).resolve()
+        if not custom_path.exists():
+            print(f"Error: server path not found: {custom_path}", file=sys.stderr)
+            print("Clear it with: voicebox config --clear-server-path", file=sys.stderr)
+            sys.exit(1)
+        if custom_path.is_dir():
+            # Directory: run `python -m backend.main` from that directory
+            # Use the project's venv Python if available
+            python = _find_venv_python(str(custom_path))
+            bin_path = None
+            cwd = str(custom_path)
+            cmd = [python, "-m", "backend.main", "--data-dir", data_dir, "--port", port]
+        elif custom_path.suffix == ".py" or _file_starts_with_python_shebang(custom_path):
+            # Python script: run with interpreter from the project's venv
+            python = _find_venv_python(str(custom_path.parent))
+            bin_path = str(custom_path)
+            cwd = str(custom_path.parent)
+            cmd = [python, bin_path, "--data-dir", data_dir, "--port", port]
+        else:
+            # Binary executable
+            bin_path = str(custom_path)
+            cwd = None
+            cmd = [bin_path, "--data-dir", data_dir, "--port", port]
+    elif local_backend.exists():
+        # Running from a project checkout — use local backend with venv Python
+        python = _find_venv_python(str(Path.cwd()))
+        bin_path = None
+        cwd = str(Path.cwd())
+        cmd = [python, "-m", "backend.main", "--data-dir", data_dir, "--port", port]
+    elif Path(SERVER_BIN).exists():
         bin_path = SERVER_BIN
+        cwd = None
+        cmd = [bin_path, "--data-dir", data_dir, "--port", port]
     elif shutil.which("voicebox-server"):
         bin_path = "voicebox-server"
+        cwd = None
+        cmd = [bin_path, "--data-dir", data_dir, "--port", port]
     else:
+        # Fallback: run from CLI's own directory with its venv
+        cli_dir = str(Path(__file__).resolve().parent)
+        python = _find_venv_python(cli_dir)
         bin_path = None
-
-    cmd = ([bin_path, "--data-dir", data_dir, "--port", port] if bin_path
-           else [sys.executable, "-m", "backend.main", "--port", port])
+        cwd = cli_dir
+        cmd = [python, "-m", "backend.main", "--data-dir", data_dir, "--port", port]
 
     if args.detach:
         if PID_FILE.exists():
@@ -400,7 +526,7 @@ def cmd_server(args):
             stdout=log,
             stderr=log,
             start_new_session=True,
-            cwd=None if bin_path else str(Path(__file__).resolve().parent),
+            cwd=cwd,
         )
         PID_FILE.write_text(str(proc.pid))
         print(f"Waiting for server (pid {proc.pid}, port {port})...", end="", flush=True)
@@ -424,13 +550,17 @@ def cmd_server(args):
         print(f"Server didn't respond within 30s. Check log: {LOG_FILE}", file=sys.stderr)
     else:
         print(f"Starting voicebox server on port {port}...")
+        if custom_server:
+            print(f"Server: {custom_server}")
+        elif local_backend.exists() and cwd == str(Path.cwd()):
+            print(f"Server: local backend ({cwd})")
+        # Show Python path if using a venv (helps debug wrong-python issues)
+        if cmd[0] != sys.executable:
+            print(f"Python: {cmd[0]}")
         print(f"Data dir: {data_dir}")
         print("Press Ctrl+C to stop.\n")
         try:
-            subprocess.run(
-                cmd,
-                cwd=None if bin_path else str(Path(__file__).resolve().parent),
-            )
+            subprocess.run(cmd, cwd=cwd)
         except KeyboardInterrupt:
             print("\nServer stopped.")
 
@@ -620,11 +750,29 @@ def cmd_config(args):
             print("Default transcribe model was not set.")
         return
 
+    if args.set_server_path:
+        resolved = str(Path(args.set_server_path).resolve())
+        if not Path(resolved).exists():
+            print(f"Warning: path does not exist: {resolved}", file=sys.stderr)
+        config["server_path"] = resolved
+        save_cli_config(config)
+        print(f"Set server path: {resolved}")
+        return
+
+    if args.clear_server_path:
+        if "server_path" in config:
+            del config["server_path"]
+            save_cli_config(config)
+            print("Cleared custom server path. Will use default resolution.")
+        else:
+            print("Custom server path was not set.")
+        return
+
+    # Show all config
     model = config.get("default_transcribe_model")
-    if model:
-        print(f"default_transcribe_model={model}")
-    else:
-        print("default_transcribe_model=(not set)")
+    server_path = config.get("server_path")
+    print(f"default_transcribe_model={model or '(not set)'}")
+    print(f"server_path={server_path or '(not set)'}")
 
 
 def cmd_transcribe(args):
@@ -775,6 +923,7 @@ def main():
     p_server.add_argument("--data-dir", help="Data directory")
     p_server.add_argument("-d", "--detach", action="store_true", help="Run in background")
     p_server.add_argument("--stop", action="store_true", help="Stop a detached server")
+    p_server.add_argument("--server-path", help="Path to server binary or Python entry point (saved to config)")
 
     # voices
     p_voices = sub.add_parser("voices", help="List voice profiles (or delete one)")
@@ -804,6 +953,8 @@ def main():
     g_cfg = p_config.add_mutually_exclusive_group()
     g_cfg.add_argument("--set-transcribe-model", metavar="MODEL", help="Set default transcribe model")
     g_cfg.add_argument("--clear-transcribe-model", action="store_true", help="Clear default transcribe model")
+    g_cfg.add_argument("--set-server-path", metavar="PATH", help="Set custom server binary/script path")
+    g_cfg.add_argument("--clear-server-path", action="store_true", help="Clear custom server path (use default)")
 
     # transcribe
     p_transcribe = sub.add_parser("transcribe", aliases=["stt"], help="Transcribe an audio/video file")
