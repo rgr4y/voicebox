@@ -57,3 +57,4 @@ tauri/src-tauri/binaries/*
 tmp/
 temp/
 *.tmp
+output*.m4a
