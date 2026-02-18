@@ -41,6 +41,7 @@ from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
 from .platform_detect import get_backend_type
+from . import model_registry
 
 logger = logging.getLogger(__name__)
 
@@ -222,12 +223,9 @@ async def health():
     # Check if default model is downloaded (cached)
     model_downloaded = None
     try:
-        # Check if the default model (1.7B) is cached
-        # Use different model IDs based on backend
-        if backend_type == "mlx":
-            default_model_id = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit"
-        else:
-            default_model_id = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+        # Check if the default model is cached
+        _bk = "mlx" if backend_type == "mlx" else "pytorch"
+        default_model_id = model_registry.get_hf_repo(model_registry.DEFAULT_MODEL_SIZE, _bk)
         
         # Method 1: Try scan_cache_dir if available
         try:
@@ -672,7 +670,7 @@ async def generate_speech(
             text=data.text,
             language=data.language,
             seed=data.seed,
-            model_size=data.model_size or "1.7B",
+            model_size=data.model_size or model_registry.DEFAULT_MODEL_SIZE,
             instruct=data.instruct,
             request_user_id=data.request_user_id,
             request_user_first_name=data.request_user_first_name,
@@ -727,13 +725,9 @@ async def generate_speech(
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found")
 
-        voice_prompt = await profiles.create_voice_prompt_for_profile(
-            data.profile_id, db,
-        )
-
         # Don't silently download — require the model to be cached first.
         # Check before acquiring the lock so we fail fast without blocking.
-        model_size = data.model_size or "1.7B"
+        model_size = data.model_size or model_registry.DEFAULT_MODEL_SIZE
         _tts_model_check = tts.get_tts_model()
         if not _tts_model_check._is_model_cached(model_size):
             model_name = f"qwen-tts-{model_size}"
@@ -745,10 +739,16 @@ async def generate_speech(
         generation_started_at = datetime.utcnow()
         async with _model_lock:
             tts_model = tts.get_tts_model()
-            model_size = data.model_size or "1.7B"
+            model_size = data.model_size or model_registry.DEFAULT_MODEL_SIZE
 
+            # Load the target model BEFORE creating the voice prompt so
+            # the prompt tensors match the model's hidden dimensions.
             await tts_model.load_model_async(model_size)
             save_model_prefs(tts_size=model_size)
+
+            voice_prompt = await profiles.create_voice_prompt_for_profile(
+                data.profile_id, db,
+            )
             audio, sample_rate = await tts_model.generate(
                 data.text, voice_prompt, data.language, data.seed, data.instruct,
             )
@@ -1489,7 +1489,7 @@ async def get_sample_audio(sample_id: str, db: Session = Depends(get_db)):
 # ============================================
 
 @app.post("/models/load")
-async def load_model(model_size: str = "1.7B"):
+async def load_model(model_size: str = model_registry.DEFAULT_MODEL_SIZE):
     """Manually load TTS model."""
     try:
         tts_model = tts.get_tts_model()
@@ -1578,13 +1578,24 @@ async def get_model_status():
         except Exception:
             return False
     
-    # Use backend-specific model IDs
+    # Build TTS model configs from the registry
+    _backend_key = "mlx" if backend_type == "mlx" else "pytorch"
+    model_configs = []
+    for size in model_registry.get_tts_sizes():
+        _sz = size  # capture for lambda
+        model_configs.append({
+            "model_name": model_registry.get_model_name(size),
+            "display_name": model_registry.get_display_name(size),
+            "description": model_registry.get_description(size),
+            "hf_repo_id": model_registry.get_hf_repo(size, _backend_key),
+            "model_size": size,
+            "model_type": "tts",
+            "check_loaded": lambda s=_sz: check_tts_loaded(s),
+        })
+
+    # Whisper model configs — backend-specific repo IDs
     if backend_type == "mlx":
-        from .backends.mlx_backend import MLXTTSBackend, MLXSTTBackend
-        _mlx_tts = MLXTTSBackend()
-        tts_1_7b_id = _mlx_tts._get_model_path("1.7B")
-        tts_0_6b_id = _mlx_tts._get_model_path("0.6B")
-        # MLX backend uses mlx-community Whisper models
+        from .backends.mlx_backend import MLXSTTBackend
         mlx_whisper_map = MLXSTTBackend.get_mlx_whisper_model_map()
         whisper_base_id = mlx_whisper_map["base"]
         whisper_small_id = mlx_whisper_map["small"]
@@ -1592,34 +1603,19 @@ async def get_model_status():
         whisper_large_id = mlx_whisper_map["large"]
         whisper_large_v3_turbo_id = mlx_whisper_map["large-v3-turbo"]
     else:
-        tts_1_7b_id = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-        tts_0_6b_id = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
         whisper_base_id = "openai/whisper-base"
         whisper_small_id = "openai/whisper-small"
         whisper_medium_id = "openai/whisper-medium"
         whisper_large_id = "openai/whisper-large"
         whisper_large_v3_turbo_id = "openai/whisper-large-v3-turbo"
-    
-    model_configs = [
-        {
-            "model_name": "qwen-tts-1.7B",
-            "display_name": "Qwen TTS 1.7B",
-            "hf_repo_id": tts_1_7b_id,
-            "model_size": "1.7B",
-            "check_loaded": lambda: check_tts_loaded("1.7B"),
-        },
-        {
-            "model_name": "qwen-tts-0.6B",
-            "display_name": "Qwen TTS 0.6B",
-            "hf_repo_id": tts_0_6b_id,
-            "model_size": "0.6B",
-            "check_loaded": lambda: check_tts_loaded("0.6B"),
-        },
+
+    model_configs += [
         {
             "model_name": "whisper-base",
             "display_name": "Whisper Base",
             "hf_repo_id": whisper_base_id,
             "model_size": "base",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("base"),
         },
         {
@@ -1627,6 +1623,7 @@ async def get_model_status():
             "display_name": "Whisper Small",
             "hf_repo_id": whisper_small_id,
             "model_size": "small",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("small"),
         },
         {
@@ -1634,6 +1631,7 @@ async def get_model_status():
             "display_name": "Whisper Medium",
             "hf_repo_id": whisper_medium_id,
             "model_size": "medium",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("medium"),
         },
         {
@@ -1641,6 +1639,7 @@ async def get_model_status():
             "display_name": "Whisper Large",
             "hf_repo_id": whisper_large_id,
             "model_size": "large",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("large"),
         },
         {
@@ -1648,6 +1647,7 @@ async def get_model_status():
             "display_name": "Whisper Large V3 Turbo",
             "hf_repo_id": whisper_large_v3_turbo_id,
             "model_size": "large-v3-turbo",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("large-v3-turbo"),
         },
     ]
@@ -1782,6 +1782,9 @@ async def get_model_status():
                 downloading=is_downloading,
                 size_mb=size_mb,
                 loaded=loaded,
+                model_type=model_config.get("model_type"),
+                model_size=model_config.get("model_size"),
+                description=model_config.get("description"),
             ))
         except Exception:
             # If check fails, try to at least check if loaded
@@ -1806,6 +1809,9 @@ async def get_model_status():
                 downloading=is_downloading,
                 size_mb=size_mb,
                 loaded=loaded,
+                model_type=model_config.get("model_type"),
+                model_size=model_config.get("model_size"),
+                description=model_config.get("description"),
             ))
     
     return models.ModelStatusListResponse(models=statuses)
@@ -1819,15 +1825,13 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
     task_manager = get_task_manager()
     progress_manager = get_progress_manager()
     
-    model_configs = {
-        "qwen-tts-1.7B": {
-            "model_size": "1.7B",
-            "load_func": lambda: tts.get_tts_model().load_model("1.7B"),
-        },
-        "qwen-tts-0.6B": {
-            "model_size": "0.6B",
-            "load_func": lambda: tts.get_tts_model().load_model("0.6B"),
-        },
+    model_configs = {}
+    for size in model_registry.get_tts_sizes():
+        model_configs[model_registry.get_model_name(size)] = {
+            "model_size": size,
+            "load_func": lambda s=size: tts.get_tts_model().load_model(s),
+        }
+    model_configs.update({
         "whisper-base": {
             "model_size": "base",
             "load_func": lambda: transcribe.get_whisper_model().load_model("base"),
@@ -1848,13 +1852,13 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
             "model_size": "large-v3-turbo",
             "load_func": lambda: transcribe.get_whisper_model().load_model("large-v3-turbo"),
         },
-    }
-    
+    })
+
     if request.model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_name}")
-    
+
     config = model_configs[request.model_name]
-    
+
     async def download_in_background():
         """Download model in background without blocking the HTTP request."""
         try:
@@ -1918,49 +1922,37 @@ async def delete_model(model_name: str):
     
     # Map model names to HuggingFace repo IDs — repo differs by backend
     _backend = get_backend_type()
-    if _backend == "mlx":
-        _tts_repos = {
-            "1.7B": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit",
-            "0.6B": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit",
-        }
-    else:
-        _tts_repos = {
-            "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            "0.6B": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-        }
-    model_configs = {
-        "qwen-tts-1.7B": {
-            "hf_repo_id": _tts_repos["1.7B"],
-            "model_size": "1.7B",
+    _backend_key = "mlx" if _backend == "mlx" else "pytorch"
+    model_configs = {}
+    for size in model_registry.get_tts_sizes():
+        model_configs[model_registry.get_model_name(size)] = {
+            "hf_repo_id": model_registry.get_hf_repo(size, _backend_key),
+            "model_size": size,
             "model_type": "tts",
-        },
-        "qwen-tts-0.6B": {
-            "hf_repo_id": _tts_repos["0.6B"],
-            "model_size": "0.6B",
-            "model_type": "tts",
-        },
+        }
+    model_configs.update({
         "whisper-base": {
             "hf_repo_id": "openai/whisper-base",
             "model_size": "base",
-            "model_type": "whisper",
+            "model_type": "stt",
         },
         "whisper-small": {
             "hf_repo_id": "openai/whisper-small",
             "model_size": "small",
-            "model_type": "whisper",
+            "model_type": "stt",
         },
         "whisper-medium": {
             "hf_repo_id": "openai/whisper-medium",
             "model_size": "medium",
-            "model_type": "whisper",
+            "model_type": "stt",
         },
         "whisper-large": {
             "hf_repo_id": "openai/whisper-large",
             "model_size": "large",
-            "model_type": "whisper",
+            "model_type": "stt",
         },
-    }
-    
+    })
+
     if model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
     
@@ -1981,10 +1973,13 @@ async def delete_model(model_name: str):
         # Find and delete the cache directory (using HuggingFace's OS-specific cache location).
         # Also clean up any legacy repo paths (e.g. bf16 Base variants replaced by 4-bit).
         cache_dir = hf_constants.HF_HUB_CACHE
-        legacy_tts_repos = [
-            "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-        ]
+        # Collect all known HF repos (both backends) so we clean up
+        # legacy cache dirs when a model is deleted (e.g. bf16 → 4bit switch).
+        legacy_tts_repos = list({
+            model_registry.get_hf_repo(s, b)
+            for s in model_registry.get_tts_sizes()
+            for b in ("pytorch", "mlx")
+        })
         candidates = [hf_repo_id] + [r for r in legacy_tts_repos if r != hf_repo_id]
 
         deleted_any = False
@@ -2219,7 +2214,7 @@ async def _job_worker():
                 text = job.text
                 language = job.language
                 seed = job.seed
-                model_size = job.model_size or "1.7B"
+                model_size = job.model_size or model_registry.DEFAULT_MODEL_SIZE
                 instruct = job.instruct
                 request_user_id = job.request_user_id
                 request_user_first_name = job.request_user_first_name
@@ -2279,10 +2274,6 @@ async def _job_worker():
                     if not profile:
                         raise ValueError("Profile not found")
 
-                    voice_prompt = await profiles.create_voice_prompt_for_profile(
-                        profile_id, gen_db,
-                    )
-
                     tts_model = tts.get_tts_model()
 
                     # Don't silently download — require the model to be cached first
@@ -2298,8 +2289,14 @@ async def _job_worker():
                         status="loading",
                     )
 
+                    # Load the target model BEFORE creating the voice prompt so
+                    # the prompt tensors match the model's hidden dimensions.
                     await tts_model.load_model_async(model_size)
                     save_model_prefs(tts_size=model_size)
+
+                    voice_prompt = await profiles.create_voice_prompt_for_profile(
+                        profile_id, gen_db,
+                    )
 
                     audio, sample_rate = await tts_model.generate(
                         text, voice_prompt, language, seed, instruct,
@@ -2433,9 +2430,21 @@ async def _startup():
 
 
 async def _preload_models():
-    """Preload TTS and STT models based on saved preferences."""
+    """Preload TTS and STT models based on saved preferences.
+
+    In serverless or web-server mode the model to use is unknown at boot
+    (serverless gets it from the first request; web/Docker gets it from the
+    first queued job).  Preloading is only useful in desktop (Tauri) mode
+    where a single user's last-used preference is meaningful.
+    """
+    _serverless = os.environ.get("SERVERLESS", "") in ("1", "true")
+    _web_server = os.environ.get("WEB_SERVER", "") in ("1", "true")
+    if _serverless or _web_server:
+        logger.info("Skipping model preload (serverless/web-server mode)")
+        return
+
     prefs = _load_model_prefs()
-    tts_size = prefs.get("tts_model_size", "1.7B")
+    tts_size = prefs.get("tts_model_size", model_registry.DEFAULT_MODEL_SIZE)
 
     # Preload TTS model
     try:

@@ -65,13 +65,13 @@ export function useRestoreActiveTasks() {
 }
 
 /**
- * Map model names to display names for download toasts.
+ * Resolve a model_name to its display name using the /models/status cache.
+ * Falls back to the raw model_name if not found.
  */
-export const MODEL_DISPLAY_NAMES: Record<string, string> = {
-  'qwen-tts-1.7B': 'Qwen TTS 1.7B',
-  'qwen-tts-0.6B': 'Qwen TTS 0.6B',
-  'whisper-base': 'Whisper Base',
-  'whisper-small': 'Whisper Small',
-  'whisper-medium': 'Whisper Medium',
-  'whisper-large': 'Whisper Large',
-};
+export function getModelDisplayName(
+  modelName: string,
+  models: Array<{ model_name: string; display_name: string }> | undefined,
+): string {
+  const match = models?.find((m) => m.model_name === modelName);
+  return match?.display_name ?? modelName;
+}

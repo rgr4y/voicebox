@@ -33,7 +33,7 @@ export interface GenerationRequest {
   text: string;
   language: LanguageCode;
   seed?: number;
-  model_size?: '1.7B' | '0.6B';
+  model_size?: string;
   instruct?: string;
   request_user_id?: string;
   request_user_first_name?: string;
@@ -135,6 +135,9 @@ export interface ModelStatus {
   downloading: boolean;  // True if download is in progress
   size_mb?: number;
   loaded: boolean;
+  model_type?: string;  // "tts" or "whisper"
+  model_size?: string;  // size key like "1.7B", "0.6B"
+  description?: string;  // "Higher quality", "Faster"
 }
 
 export interface ModelStatusListResponse {

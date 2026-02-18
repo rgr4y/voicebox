@@ -22,13 +22,15 @@ import { Textarea } from '@/components/ui/textarea';
 import { LANGUAGE_OPTIONS } from '@/lib/constants/languages';
 import { useGenerationForm } from '@/lib/hooks/useGenerationForm';
 import { useProfile } from '@/lib/hooks/useProfiles';
+import { useGenerationStore } from '@/stores/generationStore';
 import { useUIStore } from '@/stores/uiStore';
 
 export function GenerationForm() {
   const selectedProfileId = useUIStore((state) => state.selectedProfileId);
   const { data: selectedProfile } = useProfile(selectedProfileId || '');
 
-  const { form, handleSubmit, isPending } = useGenerationForm();
+  const { form, handleSubmit, isPending, ttsModels, installedSizes, noModelsInstalled } = useGenerationForm();
+  const hasActiveJobs = useGenerationStore((state) => state.hasActiveJobs);
 
   async function onSubmit(data: Parameters<typeof handleSubmit>[0]) {
     await handleSubmit(data, selectedProfileId);
@@ -64,11 +66,21 @@ export function GenerationForm() {
                 <FormItem>
                   <FormLabel>Text to Speak</FormLabel>
                   <FormControl>
-                    <Textarea
-                      placeholder="Enter the text you want to generate..."
-                      className="min-h-[150px]"
-                      {...field}
-                    />
+                    <div className="relative">
+                      <Textarea
+                        placeholder="Enter the text you want to generate..."
+                        className="min-h-[150px]"
+                        disabled={noModelsInstalled}
+                        {...field}
+                      />
+                      {noModelsInstalled && (
+                        <div className="absolute inset-0 flex items-center justify-center rounded-md bg-muted/80 backdrop-blur-[1px]">
+                          <p className="text-sm text-muted-foreground font-medium px-4 text-center">
+                            No TTS models installed. Download a model from the Models page to get started.
+                          </p>
+                        </div>
+                      )}
+                    </div>
                   </FormControl>
                   <FormDescription>Max 5000 characters</FormDescription>
                   <FormMessage />
@@ -130,18 +142,31 @@ export function GenerationForm() {
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Model Size</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value}>
+                    <Select
+                      onValueChange={field.onChange}
+                      value={field.value}
+                      disabled={noModelsInstalled || hasActiveJobs()}
+                    >
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="1.7B">Qwen TTS 1.7B (Higher Quality)</SelectItem>
-                        <SelectItem value="0.6B">Qwen TTS 0.6B (Faster)</SelectItem>
+                        {ttsModels
+                          .filter((m) => installedSizes.length === 0 || installedSizes.includes(m.model_size ?? ''))
+                          .map((m) => (
+                            <SelectItem key={m.model_size ?? m.model_name} value={m.model_size ?? ''}>
+                              {m.display_name}{m.description ? ` (${m.description})` : ''}
+                            </SelectItem>
+                          ))}
                       </SelectContent>
                     </Select>
-                    <FormDescription>Larger models produce better quality</FormDescription>
+                    <FormDescription>
+                      {hasActiveJobs()
+                        ? 'Cannot change while jobs are in queue'
+                        : 'Larger models produce better quality'}
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -173,7 +198,7 @@ export function GenerationForm() {
             <Button
               type="submit"
               className="w-full"
-              disabled={isPending || !selectedProfileId}
+              disabled={isPending || !selectedProfileId || noModelsInstalled}
             >
               {isPending ? (
                 <>

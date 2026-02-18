@@ -49,7 +49,7 @@ export function FloatingGenerateBox({
   // Calculate if track editor is visible (on stories route with items)
   const hasTrackEditor = isStoriesRoute && currentStory && currentStory.items.length > 0;
 
-  const { form, handleSubmit, isPending, isQueueLimitReached } = useGenerationForm({
+  const { form, handleSubmit, isPending, isQueueLimitReached, ttsModels, modelLocked } = useGenerationForm({
     onSuccess: async (generationId) => {
       setIsInstructMode(false);
       // If on stories route and a story is selected, add generation to story
@@ -389,19 +389,22 @@ export function FloatingGenerateBox({
                     name="modelSize"
                     render={({ field }) => (
                       <FormItem className="flex-1 space-y-0">
-                        <Select onValueChange={field.onChange} defaultValue={field.value}>
+                        <Select onValueChange={field.onChange} value={field.value} disabled={modelLocked}>
                           <FormControl>
                             <SelectTrigger className="h-8 text-xs bg-card border-border rounded-full hover:bg-background/50 transition-all">
                               <SelectValue />
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="1.7B" className="text-xs text-muted-foreground">
-                              Qwen3-TTS 1.7B
-                            </SelectItem>
-                            <SelectItem value="0.6B" className="text-xs text-muted-foreground">
-                              Qwen3-TTS 0.6B
-                            </SelectItem>
+                            {ttsModels.map((m) => (
+                              <SelectItem
+                                key={m.model_size ?? m.model_name}
+                                value={m.model_size ?? ''}
+                                className="text-xs text-muted-foreground"
+                              >
+                                {m.display_name}
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                         <FormMessage className="text-xs" />

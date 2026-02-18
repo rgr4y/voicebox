@@ -31,6 +31,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from . import TTSBackend, STTBackend
+from .. import model_registry
 from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
 from ..utils.audio import normalize_audio, load_audio
 from ..utils.progress import get_progress_manager
@@ -51,7 +52,7 @@ _MLX_LOAD_LOCK = threading.Lock()
 class MLXTTSBackend:
     """MLX-based TTS backend using mlx-audio."""
 
-    def __init__(self, model_size: str = "1.7B"):
+    def __init__(self, model_size: str = model_registry.DEFAULT_MODEL_SIZE):
         self.model = None
         self.model_size = model_size
         self._current_model_size = None
@@ -68,28 +69,16 @@ class MLXTTSBackend:
     def _get_model_path(self, model_size: str) -> str:
         """
         Get the MLX model path.
-        
+
         Args:
-            model_size: Model size (1.7B or 0.6B)
-            
+            model_size: Model size (e.g. 1.7B or 0.6B)
+
         Returns:
             HuggingFace Hub model ID for MLX
         """
-        # MLX model mapping.
-        # Use Base variants — these accept ref_audio/ref_text for voice cloning.
-        # CustomVoice variants require a named speaker ('Chelsie', 'Ethan', etc.)
-        # and don't support arbitrary voice cloning.
-        # 4-bit quantized: ~900MB (1.7B) / ~300MB (0.6B) vs ~3.4GB for bf16.
-        mlx_model_map = {
-            "1.7B": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit",
-            "0.6B": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit",
-        }
-        
-        if model_size not in mlx_model_map:
+        if not model_registry.is_valid_size(model_size):
             raise ValueError(f"Unknown model size: {model_size}")
-        
-        hf_model_id = mlx_model_map[model_size]
-        return hf_model_id
+        return model_registry.get_hf_repo(model_size, "mlx")
 
     def _is_model_cached(self, model_size: str) -> bool:
         """

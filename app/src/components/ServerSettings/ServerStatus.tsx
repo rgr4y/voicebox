@@ -1,6 +1,8 @@
+import { useQuery } from '@tanstack/react-query';
 import { Loader2, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { apiClient } from '@/lib/api/client';
 import { useServerHealth } from '@/lib/hooks/useServer';
 import { useServerStore } from '@/stores/serverStore';
 import { ModelProgress } from './ModelProgress';
@@ -8,6 +10,14 @@ import { ModelProgress } from './ModelProgress';
 export function ServerStatus() {
   const { data: health, isLoading, error } = useServerHealth();
   const serverUrl = useServerStore((state) => state.serverUrl);
+
+  const { data: modelStatusData } = useQuery({
+    queryKey: ['modelStatus'],
+    queryFn: () => apiClient.getModelStatus(),
+    refetchInterval: 15_000,
+  });
+
+  const models = modelStatusData?.models ?? [];
 
   return (
     <Card>
@@ -22,12 +32,9 @@ export function ServerStatus() {
 
         {/* Model download progress */}
         <div className="space-y-2">
-          <ModelProgress modelName="qwen-tts-1.7B" displayName="Qwen TTS 1.7B" />
-          <ModelProgress modelName="qwen-tts-0.6B" displayName="Qwen TTS 0.6B" />
-          <ModelProgress modelName="whisper-base" displayName="Whisper Base" />
-          <ModelProgress modelName="whisper-small" displayName="Whisper Small" />
-          <ModelProgress modelName="whisper-medium" displayName="Whisper Medium" />
-          <ModelProgress modelName="whisper-large" displayName="Whisper Large" />
+          {models.map((m) => (
+            <ModelProgress key={m.model_name} modelName={m.model_name} displayName={m.display_name} />
+          ))}
         </div>
 
         {isLoading ? (
