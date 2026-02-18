@@ -12,12 +12,9 @@ import os
 import sys
 import logging
 
-# Set up logging FIRST, before any imports that might fail
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stderr,  # Log to stderr so it's captured by Tauri
-)
+# Set up JSON logging FIRST, before any imports that might fail
+from backend.utils.logging_config import configure_json_logging
+configure_json_logging()
 logger = logging.getLogger(__name__)
 
 # Log startup immediately to confirm binary execution
@@ -90,6 +87,7 @@ if __name__ == "__main__":
             host=args.host,
             port=args.port,
             log_level=_log_level,
+            log_config=None,  # Don't let uvicorn overwrite our JSON logging config
         )
     except Exception as e:
         logger.error(f"Server startup failed: {e}", exc_info=True)

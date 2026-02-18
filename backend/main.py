@@ -2334,11 +2334,8 @@ async def _job_worker():
 
 async def _startup():
     """Run on application startup."""
-    _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        level=getattr(logging, _log_level, logging.INFO),
-    )
+    from .utils.logging_config import configure_json_logging
+    configure_json_logging()
     logger.info("voicebox API starting up...")
     database.init_db()
     logger.info(f"Database initialized at {database._db_path}")
@@ -2447,7 +2444,16 @@ if __name__ == "__main__":
         default=None,
         help="Data directory for database, profiles, and generated audio",
     )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        default=False,
+        help="Enable auto-reload (development only)",
+    )
     args = parser.parse_args()
+
+    from backend.utils.logging_config import configure_json_logging
+    configure_json_logging()
 
     # Set data directory if provided
     if args.data_dir:
@@ -2461,6 +2467,8 @@ if __name__ == "__main__":
         "backend.main:app",
         host=args.host,
         port=args.port,
-        reload=False,  # Disable reload in production
+        reload=args.reload,
+        reload_dirs=["backend"] if args.reload else None,
         log_level=_log_level,
+        log_config=None,  # Don't let uvicorn overwrite our JSON logging config
     )

@@ -33,8 +33,7 @@ echo "[dev-backend-watch] Using python: $EXPECTED_PY"
 "$EXPECTED_PY" -c 'import sys; print(f"[dev-backend-watch] Python {sys.version.split()[0]}")'
 
 cd "$ROOT_DIR"
-exec "$EXPECTED_PY" -m uvicorn backend.main:app \
+exec "$EXPECTED_PY" -m backend.main \
   --host 127.0.0.1 \
   --port "$PORT" \
-  --reload \
-  --reload-dir backend
+  --reload
