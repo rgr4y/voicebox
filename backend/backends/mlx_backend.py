@@ -154,7 +154,7 @@ class MLXTTSBackend:
             with _MLX_LOAD_LOCK:
                 # Re-check inside the lock — another caller may have loaded while we waited
                 if self.model is not None and self._current_model_size == model_size:
-                    logger.debug(f"[TTS] Load skipped — model {model_size} already loaded by concurrent caller")
+                    logger.debug(f"[TTS] Load skipped — model {model_size} already loaded by concurrent caller", extra={"subtype": ["engine", "tts"]})
                     return
                 if self.model is not None and self._current_model_size != model_size:
                     self.unload_model()
@@ -184,7 +184,7 @@ class MLXTTSBackend:
             progress_callback = create_hf_progress_callback(model_name, progress_manager)
             tracker = HFProgressTracker(progress_callback, filter_non_downloads=is_cached)
             
-            logger.info(f"Loading MLX TTS model {model_size}...")
+            logger.info(f"Loading MLX TTS model {model_size}...", extra={"subtype": ["engine", "tts"]})
 
             if not is_cached:
                 # Start tracking download task
@@ -227,10 +227,10 @@ class MLXTTSBackend:
             self._current_model_size = model_size
             self.model_size = model_size
 
-            logger.info(f"MLX TTS model {model_size} loaded successfully")
+            logger.info(f"MLX TTS model {model_size} loaded successfully", extra={"subtype": ["engine", "tts"]})
 
         except ImportError as e:
-            logger.error(f"Error: mlx_audio package not found. Install with: pip install mlx-audio")
+            logger.error(f"Error: mlx_audio package not found. Install with: pip install mlx-audio", extra={"subtype": ["engine", "tts"]})
             self.model = None
             self._current_model_size = None
             progress_manager = get_progress_manager()
@@ -240,7 +240,7 @@ class MLXTTSBackend:
             task_manager.error_download(model_name, str(e))
             raise
         except Exception as e:
-            logger.error(f"Error loading MLX TTS model: {e}")
+            logger.error(f"Error loading MLX TTS model: {e}", extra={"subtype": ["engine", "tts"]})
             self.model = None
             self._current_model_size = None
             progress_manager = get_progress_manager()
@@ -258,7 +258,7 @@ class MLXTTSBackend:
             del self.model
             self.model = None
             self._current_model_size = None
-            logger.info(f"MLX TTS model unloaded ({size})")
+            logger.info(f"MLX TTS model unloaded ({size})", extra={"subtype": ["engine", "tts"]})
 
     async def create_voice_prompt(
         self,
@@ -608,7 +608,7 @@ class MLXSTTBackend:
             progress_callback = create_hf_progress_callback(progress_model_name, progress_manager)
             tracker = HFProgressTracker(progress_callback, filter_non_downloads=is_cached)
 
-            logger.info(f"Loading MLX Whisper model {model_size}...")
+            logger.info(f"Loading MLX Whisper model {model_size}...", extra={"subtype": "engine"})
 
             # Only track download progress if model is NOT cached
             if not is_cached:
@@ -656,10 +656,10 @@ class MLXSTTBackend:
             self._current_model_size = model_size
             self.model_size = model_size
 
-            logger.info(f"MLX Whisper model {model_size} loaded successfully")
+            logger.info(f"MLX Whisper model {model_size} loaded successfully", extra={"subtype": "engine"})
 
         except ImportError as e:
-            logger.error(f"Error: mlx_audio package not found. Install with: pip install mlx-audio")
+            logger.error(f"Error: mlx_audio package not found. Install with: pip install mlx-audio", extra={"subtype": "engine"})
             self.model = None
             self._current_model_size = None
             progress_manager = get_progress_manager()
@@ -669,7 +669,7 @@ class MLXSTTBackend:
             task_manager.error_download(progress_model_name, str(e))
             raise
         except Exception as e:
-            logger.error(f"Error loading MLX Whisper model: {e}")
+            logger.error(f"Error loading MLX Whisper model: {e}", extra={"subtype": "engine"})
             self.model = None
             self._current_model_size = None
             progress_manager = get_progress_manager()
@@ -687,7 +687,7 @@ class MLXSTTBackend:
             del self.model
             self.model = None
             self._current_model_size = None
-            logger.info(f"MLX Whisper model unloaded ({size})")
+            logger.info(f"MLX Whisper model unloaded ({size})", extra={"subtype": "engine"})
 
     async def transcribe(
         self,

@@ -46,6 +46,7 @@ data/model_prefs.json
 # Logs
 *.log
 logs/
+!logs/.gitkeep
 
 # Environment
 .env

@@ -2118,17 +2118,17 @@ def _cleanup_stale_jobs():
         for job in stale:
             job.status = "timeout"
             job.completed_at = datetime.utcnow()
-            logger.info(f"[TTS] Marked stale job {job.id} as timeout (server restart)")
+            logger.info(f"[Queue] Marked stale job {job.id} as timeout (server restart)")
         if stale:
             db.commit()
-            logger.info(f"[TTS] Cleaned up {len(stale)} stale jobs from previous run")
+            logger.info(f"[Queue] Cleaned up {len(stale)} stale jobs from previous run")
     finally:
         db.close()
 
 
 async def _job_worker():
     """Background worker that processes queued generation jobs one at a time."""
-    logger.info("[TTS] Job worker started")
+    logger.info("[Queue] Job worker started")
     while True:
         try:
             # Wait for signal or poll every 2s
@@ -2157,7 +2157,7 @@ async def _job_worker():
                         get_progress_manager().mark_error(job.id, "Generation timeout")
                     except Exception:
                         pass
-                    logger.warning(f"[TTS] Job {job.id} timed out (stuck >5 min)")
+                    logger.warning(f"[Queue] Job {job.id} timed out (stuck >5 min)")
                 if stuck:
                     db.commit()
 
@@ -2325,10 +2325,10 @@ async def _job_worker():
             _job_signal.set()
 
         except asyncio.CancelledError:
-            logger.info("[TTS] Job worker shutting down")
+            logger.info("[Queue] Job worker shutting down")
             break
         except Exception as e:
-            logger.exception(f"[TTS] Job worker error: {e}")
+            logger.exception(f"[Queue] Job worker error: {e}")
             await asyncio.sleep(2)
 
 
@@ -2336,12 +2336,12 @@ async def _startup():
     """Run on application startup."""
     from .utils.logging_config import configure_json_logging
     configure_json_logging()
-    logger.info("voicebox API starting up...")
+    logger.info("voicebox API starting up...", extra={"subtype": "api"})
     database.init_db()
-    logger.info(f"Database initialized at {database._db_path}")
+    logger.info(f"Database initialized at {database._db_path.resolve()}")
     backend_type = get_backend_type()
-    logger.info(f"Backend: {backend_type.upper()}")
-    logger.info(f"GPU available: {_get_gpu_status()}")
+    logger.info(f"Backend: {backend_type.upper()}", extra={"subtype": "engine"})
+    logger.info(f"GPU available: {_get_gpu_status()}", extra={"subtype": "engine"})
 
     # Initialize progress manager with main event loop for thread-safe operations
     try:
@@ -2358,13 +2358,13 @@ async def _startup():
         # Check for HF_TOKEN (huggingface_hub reads it automatically)
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
         if hf_token:
-            logger.info(f"HuggingFace token: {'*' * 4}{hf_token[-4:]}")
+            logger.info(f"HuggingFace token: {'*' * 4}{hf_token[-4:]}", extra={"subtype": "huggingface"})
         else:
-            logger.info("HuggingFace token: not set (set HF_TOKEN env var for gated models)")
+            logger.info("HuggingFace token: not set (set HF_TOKEN env var for gated models)", extra={"subtype": "huggingface"})
 
         cache_dir = Path(hf_constants.HF_HUB_CACHE)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"HuggingFace cache directory: {cache_dir}")
+        logger.info(f"HuggingFace cache directory: {cache_dir}", extra={"subtype": "huggingface"})
     except Exception as e:
         logger.warning(f"Could not set up HuggingFace: {e}")
         logger.warning("Model downloads may fail. Please ensure the directory exists and has write permissions.")
@@ -2400,9 +2400,9 @@ async def _preload_models():
     try:
         tts_backend = tts.get_tts_model()
         if tts_backend._is_model_cached(tts_size):
-            logger.info(f"Preloading TTS model ({tts_size})...")
+            logger.info(f"Preloading TTS model ({tts_size})...", extra={"subtype": "tts"})
             await tts_backend.load_model_async(tts_size)
-            logger.info(f"TTS model ({tts_size}) preloaded")
+            logger.info(f"TTS model ({tts_size}) preloaded", extra={"subtype": "tts"})
         else:
             logger.info(f"TTS model ({tts_size}) not cached, skipping preload")
     except Exception as e:
@@ -2414,7 +2414,7 @@ async def _preload_models():
 
 async def _shutdown():
     """Run on application shutdown."""
-    logger.info("voicebox API shutting down...")
+    logger.info("voicebox API shutting down...", extra={"subtype": "api"})
     # Unload models to free memory
     tts.unload_tts_model()
     transcribe.unload_whisper_model()
@@ -2468,7 +2468,11 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port,
         reload=args.reload,
-        reload_dirs=["backend"] if args.reload else None,
+        reload_dirs=["backend/backends", "backend/utils", "backend/main.py",
+                     "backend/tts.py", "backend/models.py", "backend/profiles.py",
+                     "backend/stories.py", "backend/studio.py", "backend/transcribe.py",
+                     "backend/database.py", "backend/config.py", "backend/channels.py",
+                     "backend/history.py", "backend/export_import.py"] if args.reload else None,
         log_level=_log_level,
         log_config=None,  # Don't let uvicorn overwrite our JSON logging config
     )
