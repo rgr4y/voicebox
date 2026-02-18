@@ -2270,6 +2270,14 @@ async def _job_worker():
                         model_name = f"qwen-tts-{model_size}"
                         raise ValueError(f"Model {model_name} is not downloaded. Please download it first from the Models page.")
 
+                    # Tell the CLI the model is loading (may involve a download on first run)
+                    progress_manager.update_progress(
+                        model_name=job_id,
+                        current=0,
+                        total=100,
+                        status="loading",
+                    )
+
                     await tts_model.load_model_async(model_size)
                     save_model_prefs(tts_size=model_size)
 
