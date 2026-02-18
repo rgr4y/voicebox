@@ -127,7 +127,7 @@ dev-backend-watch: ## Start backend with venv verification + Python file watchin
 
 dev-frontend: ## Start Tauri desktop app
 	@echo -e "$(BLUE)Starting Tauri desktop app...$(NC)"
-	bun run dev
+	PATH="$(HOME)/.bun/bin:$$PATH" bun run dev
 
 dev-web: ## Start backend + web app (parallel)
 	@echo -e "$(BLUE)Starting web development servers...$(NC)"

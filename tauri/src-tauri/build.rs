@@ -40,7 +40,7 @@ fn main() {
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .unwrap_or_default();
-        let is_dev_machine = hostname.trim() == "mimi";
+        let is_dev_machine = hostname.trim().starts_with("mimi");
         let compile_icons = std::env::var("VOICEBOX_COMPILE_ICONS").is_ok() || is_dev_machine;
 
         if std::path::Path::new(&icon_source).exists() && compile_icons {

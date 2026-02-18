@@ -1916,15 +1916,26 @@ async def delete_model(model_name: str):
     import shutil
     from huggingface_hub import constants as hf_constants
     
-    # Map model names to HuggingFace repo IDs
+    # Map model names to HuggingFace repo IDs — repo differs by backend
+    _backend = get_backend_type()
+    if _backend == "mlx":
+        _tts_repos = {
+            "1.7B": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit",
+            "0.6B": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit",
+        }
+    else:
+        _tts_repos = {
+            "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            "0.6B": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        }
     model_configs = {
         "qwen-tts-1.7B": {
-            "hf_repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            "hf_repo_id": _tts_repos["1.7B"],
             "model_size": "1.7B",
             "model_type": "tts",
         },
         "qwen-tts-0.6B": {
-            "hf_repo_id": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+            "hf_repo_id": _tts_repos["0.6B"],
             "model_size": "0.6B",
             "model_type": "tts",
         },
@@ -1967,23 +1978,32 @@ async def delete_model(model_name: str):
             if whisper_model.is_loaded() and whisper_model.model_size == config["model_size"]:
                 transcribe.unload_whisper_model()
         
-        # Find and delete the cache directory (using HuggingFace's OS-specific cache location)
+        # Find and delete the cache directory (using HuggingFace's OS-specific cache location).
+        # Also clean up any legacy repo paths (e.g. bf16 Base variants replaced by 4-bit).
         cache_dir = hf_constants.HF_HUB_CACHE
-        repo_cache_dir = Path(cache_dir) / ("models--" + hf_repo_id.replace("/", "--"))
-        
-        # Check if the cache directory exists
-        if not repo_cache_dir.exists():
+        legacy_tts_repos = [
+            "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        ]
+        candidates = [hf_repo_id] + [r for r in legacy_tts_repos if r != hf_repo_id]
+
+        deleted_any = False
+        for repo in candidates:
+            repo_cache_dir = Path(cache_dir) / ("models--" + repo.replace("/", "--"))
+            if repo_cache_dir.exists():
+                try:
+                    shutil.rmtree(repo_cache_dir)
+                    deleted_any = True
+                    logger.info(f"Deleted model cache: {repo_cache_dir}")
+                except OSError as e:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to delete model cache directory: {str(e)}"
+                    )
+
+        if not deleted_any:
             raise HTTPException(status_code=404, detail=f"Model {model_name} not found in cache")
-        
-        # Delete the entire cache directory for this model
-        try:
-            shutil.rmtree(repo_cache_dir)
-        except OSError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to delete model cache directory: {str(e)}"
-            )
-        
+
         return {"message": f"Model {model_name} deleted successfully"}
         
     except HTTPException:

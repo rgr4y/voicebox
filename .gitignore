@@ -54,6 +54,7 @@ logs/
 
 # Generated files
 app/openapi.json
+backend/voicebox-server.spec
 tauri/src-tauri/binaries/*
 
 # Temporary

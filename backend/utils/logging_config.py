@@ -10,9 +10,10 @@ import datetime
 import json
 import logging
 import os
+import re
 import sys
 
-from pythonjsonlogger.jsonlogger import JsonFormatter
+from pythonjsonlogger.json import JsonFormatter
 
 # Uvicorn owns these logger names; we override them so nothing slips through as plain text.
 _UVICORN_LOGGERS = (
@@ -34,6 +35,8 @@ _STDERR_SWALLOW = (
     "_check_closed",
     "_append_ready_handle",
     "_do_shutdown",
+    "resource_tracker: There appear to be",
+    "leaked semaphore objects to clean up",
 )
 
 
@@ -49,7 +52,7 @@ class _JsonStdout:
                 "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3],
                 "level": "INFO",
                 "logger": "stdout",
-                "message": msg.rstrip(),
+                "message": msg.strip(),
             })
             self._real.write(line + "\n")
         elif msg == "\n":
@@ -160,7 +163,7 @@ class _AccessLogFilter(logging.Filter):
 
 
 class _FilteredStderr:
-    """Wraps real stderr, dropping known noisy shutdown tracebacks."""
+    """Wraps real stderr: swallows known noise, wraps everything else as JSON."""
 
     def __init__(self, real):
         self._real = real
@@ -176,7 +179,29 @@ class _FilteredStderr:
                 return
             self._suppressing = False
             return
-        self._real.write(msg)
+        text = msg.strip()
+        if not text:
+            return
+        # Already valid JSON (e.g. from our logging handler) — pass through raw.
+        if text.startswith("{"):
+            try:
+                json.loads(text)
+                self._real.write(text + "\n")
+                return
+            except json.JSONDecodeError:
+                pass
+        # Strip block-drawing chars and excess whitespace (tqdm progress bars)
+        text = re.sub(r'[\u2580-\u259f\u2588-\u258f]+', '', text)  # block elements
+        text = re.sub(r' {4,}', ' ', text).strip()  # collapse padding spaces
+        if not text:
+            return
+        line = json.dumps({
+            "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3],
+            "level": "INFO",
+            "logger": "stderr",
+            "message": text,
+        })
+        self._real.write(line + "\n")
 
     def flush(self):
         self._real.flush()
@@ -224,6 +249,23 @@ def configure_json_logging(log_level: str | None = None) -> None:
         "qwen_tts.core.models.configuration_qwen3_tts",  # "talker_config is None" info spam
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    # Route unhandled thread exceptions through logging.
+    # KeyboardInterrupt in threads during shutdown is normal — drop it silently.
+    # Everything else is a real error and gets logged as ERROR with full traceback.
+    import threading
+    _thread_logger = logging.getLogger("threading")
+
+    def _thread_excepthook(args):
+        if args.exc_type is KeyboardInterrupt:
+            return
+        _thread_logger.error(
+            "Unhandled exception in thread %s",
+            args.thread.name if args.thread else "<unknown>",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = _thread_excepthook
 
     # Wrap stdout so bare print() calls become JSON lines
     if not isinstance(sys.stdout, _JsonStdout):

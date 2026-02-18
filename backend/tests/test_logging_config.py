@@ -282,6 +282,28 @@ class TestJsonLoggingConfig(unittest.TestCase):
             self.assertIn("hello from print", row["message"])
             self.assertEqual(row["logger"], "stdout")
 
+    def test_tqdm_cr_prefix_stripped(self):
+        """tqdm writes \\r-prefixed progress bars to stdout; \\r must not appear in message."""
+        buf_out = io.StringIO()
+        real_stdout = sys.stdout
+
+        _install_logging()
+        import backend.utils.logging_config as lc
+        if isinstance(sys.stdout, lc._JsonStdout):
+            sys.stdout._real = buf_out
+
+        try:
+            sys.stdout.write("\rDownloading model.safetensors:  42%|████      | 123M/2.33G [00:05<01:10, 30.5MB/s]")
+        finally:
+            sys.stdout = real_stdout
+
+        output = buf_out.getvalue().strip()
+        self.assertTrue(output, "Expected JSON output from tqdm-style write")
+        row = json.loads(output)
+        self.assertNotIn("\r", row["message"])
+        self.assertIn("Downloading", row["message"])
+        self.assertEqual(row["logger"], "stdout")
+
     # ------------------------------------------------------------------
     # 5. stderr noise suppression
     # ------------------------------------------------------------------
@@ -343,6 +365,42 @@ class TestJsonLoggingConfig(unittest.TestCase):
         logging.getLogger("uvicorn").handle(record)
         row = _last(buf)
         self.assertNotIn("color_message", row)
+
+    # ------------------------------------------------------------------
+    # 6b. threading.excepthook
+    # ------------------------------------------------------------------
+
+    def test_thread_exception_captured_as_json(self):
+        """Unhandled thread exceptions must be routed through logging, not raw stderr."""
+        import threading
+        buf = _install_logging()
+
+        exc = RuntimeError("thread blew up")
+        args = threading.ExceptHookArgs(
+            (type(exc), exc, exc.__traceback__, threading.current_thread())
+        )
+        threading.excepthook(args)
+
+        rows = _lines(buf)
+        error_rows = [r for r in rows if r.get("level") == "ERROR"]
+        self.assertTrue(error_rows, "Expected an ERROR log line from thread exception")
+        self.assertIn("thread blew up", error_rows[-1].get("exc_info", "") + error_rows[-1].get("message", ""))
+
+    def test_thread_keyboard_interrupt_suppressed(self):
+        """KeyboardInterrupt in threads must be silently dropped — not logged."""
+        import threading
+        buf = _install_logging()
+
+        args = threading.ExceptHookArgs(
+            (KeyboardInterrupt, KeyboardInterrupt(), None, threading.current_thread())
+        )
+        threading.excepthook(args)
+
+        rows = _lines(buf)
+        self.assertFalse(
+            any(r.get("level") == "ERROR" for r in rows),
+            "KeyboardInterrupt in thread must not produce an ERROR log line",
+        )
 
     # ------------------------------------------------------------------
     # 7. Every output line is valid JSON (smoke test)
