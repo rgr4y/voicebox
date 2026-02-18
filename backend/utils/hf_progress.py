@@ -189,12 +189,21 @@ class HFProgressTracker:
     @contextmanager
     def patch_download(self):
         """Context manager to patch tqdm for progress tracking."""
+        # Attempt to set up tqdm patching. If tqdm isn't available, skip patching
+        # but still yield so the with-body runs. Keep setup separate from the yield
+        # so that exceptions from the with-body don't get swallowed by except ImportError
+        # (ModuleNotFoundError is a subclass of ImportError, which caused the
+        # "generator didn't stop after throw()" bug when qwen_tts was missing).
         try:
             import tqdm as tqdm_module
+            tqdm_available = True
+        except ImportError:
+            tqdm_available = False
 
+        if tqdm_available:
             # Store original tqdm class
             self._original_tqdm_class = tqdm_module.tqdm
-            
+
             # Reset totals
             with self._lock:
                 self._total_downloaded = 0
@@ -203,7 +212,7 @@ class HFProgressTracker:
                 self._file_downloaded = {}
                 self._current_filename = ""
                 self._active_tqdms = {}
-            
+
             # Create our tracked tqdm class
             tracked_tqdm = self._create_tracked_tqdm_class()
 
@@ -215,7 +224,7 @@ class HFProgressTracker:
             if hasattr(tqdm_module, "auto") and hasattr(tqdm_module.auto, "tqdm"):
                 self._original_tqdm_auto = tqdm_module.auto.tqdm
                 tqdm_module.auto.tqdm = tracked_tqdm
-            
+
             # NOTE: We intentionally do NOT replace tqdm classes in sys.modules
             # with TrackedTqdm. That approach causes `super()` errors because
             # huggingface_hub's tqdm subclass instances aren't TrackedTqdm instances.
@@ -264,11 +273,8 @@ class HFProgressTracker:
 
             if not self.filter_non_downloads:
                 logger.debug(f"[HFProgressTracker] Patched {patched_count} tqdm references")
-            
-            yield
-            
-        except ImportError:
-            # If tqdm not available, just yield without patching
+
+        try:
             yield
         finally:
             # Restore original tqdm

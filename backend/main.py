@@ -21,8 +21,19 @@ import tempfile
 import io
 from pathlib import Path
 import uuid
-import signal
 import os
+
+# Set HSA_OVERRIDE_GFX_VERSION for AMD GPUs that aren't officially listed in ROCm
+# (e.g., RX 580 is gfx803, RX 6600 is gfx1032 which maps to gfx1030 target)
+# This must be set BEFORE any torch.cuda calls
+if not os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
+    os.environ["HSA_OVERRIDE_GFX_VERSION"] = "10.3.0"
+
+# Suppress noisy MIOpen workspace warnings on AMD GPUs
+if not os.environ.get("MIOPEN_LOG_LEVEL"):
+    os.environ["MIOPEN_LOG_LEVEL"] = "4"
+
+import signal
 
 from . import database, models, profiles, history, tts, transcribe, config, export_import, channels, stories, __version__
 from .database import get_db, Generation as DBGeneration, GenerationJob as DBGenerationJob, VoiceProfile as DBVoiceProfile
@@ -2068,7 +2079,11 @@ def _get_gpu_status() -> str:
     """Get GPU availability status."""
     backend_type = get_backend_type()
     if torch.cuda.is_available():
-        return f"CUDA ({torch.cuda.get_device_name(0)})"
+        device_name = torch.cuda.get_device_name(0)
+        is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+        if is_rocm:
+            return f"ROCm ({device_name})"
+        return f"CUDA ({device_name})"
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         return "MPS (Apple Silicon)"
     elif backend_type == "mlx":

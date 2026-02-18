@@ -66,14 +66,41 @@ setup-python: $(VENV)/bin/activate ## Set up Python virtual environment and depe
 	fi
 	@echo -e "$(GREEN)✓ Python environment ready$(NC)"
 
+setup-python-linux-cuda: $(VENV)/bin/activate ## Set up Python venv for Linux + CUDA (matches Docker image exactly)
+	@echo -e "$(BLUE)Installing Python dependencies for Linux/CUDA (mirrors Dockerfile)...$(NC)"
+	$(PIP) install --upgrade pip
+	$(PIP) install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+	$(PIP) install -r $(BACKEND_DIR)/requirements-linux.txt --extra-index-url https://download.pytorch.org/whl/cu124
+	@echo -e "$(GREEN)✓ Python environment ready (Linux/CUDA)$(NC)"
+	@echo -e "$(YELLOW)Use this venv with DEV_VENV=1 in docker-compose.local.yml$(NC)"
+
 $(VENV)/bin/activate:
 	@echo -e "$(BLUE)Creating Python virtual environment...$(NC)"
-	@PY_MINOR=$$($(PYTHON) -c "import sys; print(sys.version_info[1])"); \
-	if [ "$$PY_MINOR" -gt 13 ]; then \
-		echo -e "$(YELLOW)Warning: Python 3.$$PY_MINOR detected. ML packages may not be compatible.$(NC)"; \
-		echo -e "$(YELLOW)Recommended: Use Python 3.12 or 3.13 (brew install python@3.12)$(NC)"; \
+	@# On Linux, prefer pyenv 3.12 (matches Docker image) and use --copies so symlinks
+	@# resolve inside the container (which doesn't have ~/.pyenv mounted).
+	@# On macOS, use the default Python (managed by brew/pyenv separately).
+	@if [ "$$(uname)" = "Linux" ]; then \
+		PYENV_PY=$$(echo $$HOME/.pyenv/versions/3.12.*/bin/python3.12 | tr ' ' '\n' | sort -V | tail -1); \
+		if [ -x "$$PYENV_PY" ]; then \
+			echo -e "$(BLUE)Using pyenv Python 3.12 with --copies (Docker-compatible)...$(NC)"; \
+			echo -e "$(YELLOW)  $$PYENV_PY$(NC)"; \
+			$$PYENV_PY -m venv --copies $(VENV); \
+		elif command -v python3.12 >/dev/null 2>&1; then \
+			echo -e "$(BLUE)Using system python3.12 with --copies...$(NC)"; \
+			python3.12 -m venv --copies $(VENV); \
+		else \
+			echo -e "$(YELLOW)Warning: Python 3.12 not found, using default $(PYTHON)$(NC)"; \
+			echo -e "$(YELLOW)  Install via: pyenv install 3.12.12$(NC)"; \
+			$(PYTHON) -m venv --copies $(VENV); \
+		fi; \
+	else \
+		PY_MINOR=$$($(PYTHON) -c "import sys; print(sys.version_info[1])"); \
+		if [ "$$PY_MINOR" -gt 13 ]; then \
+			echo -e "$(YELLOW)Warning: Python 3.$$PY_MINOR detected. ML packages may not be compatible.$(NC)"; \
+			echo -e "$(YELLOW)Recommended: Use Python 3.12 or 3.13 (brew install python@3.12)$(NC)"; \
+		fi; \
+		$(PYTHON) -m venv $(VENV); \
 	fi
-	$(PYTHON) -m venv $(VENV)
 
 setup-rust: ## Install Rust toolchain (if not present)
 	@command -v rustc >/dev/null 2>&1 || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh

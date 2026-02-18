@@ -184,15 +184,18 @@ class PyTorchTTSBackend:
                     status="loading",
                 )
 
-            # Patch tqdm and use HF offline mode for cached models to skip remote validation
-            with tracker.patch_download(), hf_offline_for_cached(is_cached):
+            # Patch tqdm; pass local_files_only when cached to skip remote validation
+            with tracker.patch_download():
                 from qwen_tts import Qwen3TTSModel
 
-                self.model = Qwen3TTSModel.from_pretrained(
-                    model_path,
+                dtype = torch.float32 if self.device == "cpu" else torch.bfloat16
+                load_kwargs = dict(
                     device_map=self.device,
-                    torch_dtype=torch.float32 if self.device == "cpu" else torch.bfloat16,
+                    torch_dtype=dtype,
                 )
+                if is_cached:
+                    load_kwargs["local_files_only"] = True
+                self.model = Qwen3TTSModel.from_pretrained(model_path, **load_kwargs)
 
             if not is_cached:
                 progress_manager.mark_complete(model_name)
@@ -214,7 +217,7 @@ class PyTorchTTSBackend:
             task_manager.error_download(model_name, str(e))
             raise
         except Exception as e:
-            logger.error(f"Error loading TTS model: {e}")
+            logger.error(f"Error loading TTS model: {e}", exc_info=True)
             logger.info(f"Tip: The model will be automatically downloaded from HuggingFace Hub on first use.")
             progress_manager = get_progress_manager()
             task_manager = get_task_manager()
@@ -378,7 +381,7 @@ class PyTorchTTSBackend:
 class PyTorchSTTBackend:
     """PyTorch-based STT backend using Whisper."""
     
-    def __init__(self, model_size: str = "base"):
+    def __init__(self, model_size: str = "turbo"):
         self.model = None
         self.processor = None
         self.model_size = model_size
@@ -479,7 +482,10 @@ class PyTorchSTTBackend:
             progress_callback = create_hf_progress_callback(progress_model_name, progress_manager)
             tracker = HFProgressTracker(progress_callback, filter_non_downloads=is_cached)
 
-            model_name = f"openai/whisper-{model_size}"
+            model_size_to_hf = {
+                "turbo": "openai/whisper-large-v3-turbo",
+            }
+            model_name = model_size_to_hf.get(model_size, f"openai/whisper-{model_size}")
 
             logger.info(f"Loading Whisper model {model_size} on {self.device}...")
 
@@ -567,21 +573,20 @@ class PyTorchSTTBackend:
             )
             inputs = inputs.to(self.device)
             
-            # Set language if provided
-            forced_decoder_ids = None
+            # Generate transcription
+            # If language is provided, force it; otherwise let Whisper auto-detect
+            generate_kwargs = {}
             if language:
-                # Support all languages from frontend: en, zh, ja, ko, de, fr, ru, pt, es, it
-                # Whisper supports these and many more
                 forced_decoder_ids = self.processor.get_decoder_prompt_ids(
                     language=language,
                     task="transcribe",
                 )
-            
-            # Generate transcription
+                generate_kwargs["forced_decoder_ids"] = forced_decoder_ids
+
             with torch.no_grad():
                 predicted_ids = self.model.generate(
                     inputs["input_features"],
-                    forced_decoder_ids=forced_decoder_ids,
+                    **generate_kwargs,
                 )
             
             # Decode

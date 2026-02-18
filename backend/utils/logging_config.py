@@ -25,15 +25,11 @@ _UVICORN_LOGGERS = (
 
 # Tracebacks from uvloop/threading on shutdown that escape via raw stderr.
 # These are cosmetic noise on clean Ctrl+C — swallow them.
+# NOTE: Do NOT include "Traceback (most recent call last)" here — that would
+# swallow real error tracebacks from third-party libraries like qwen_tts.
 _STDERR_SWALLOW = (
-    "Exception in thread",
     "uvloop/loop.pyx",
     "RuntimeError: Event loop is closed",
-    "During handling of the above exception",
-    "Traceback (most recent call last)",
-    "self._target(*self._args",
-    "self.run()",
-    "_bootstrap_inner",
     "call_soon_threadsafe",
     "_check_closed",
     "_append_ready_handle",
@@ -221,6 +217,13 @@ def configure_json_logging(log_level: str | None = None) -> None:
 
     # Attach structured HTTP field extractor to access logger only
     logging.getLogger("uvicorn.access").addFilter(access_filter)
+
+    # Silence noisy third-party loggers
+    for noisy in (
+        "torio._extension.utils",       # "Loading FFmpeg6" debug spam
+        "qwen_tts.core.models.configuration_qwen3_tts",  # "talker_config is None" info spam
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     # Wrap stdout so bare print() calls become JSON lines
     if not isinstance(sys.stdout, _JsonStdout):
