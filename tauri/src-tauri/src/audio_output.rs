@@ -27,7 +27,7 @@ mod coreaudio_enum {
         AudioObjectPropertyAddress,
     };
     use core_foundation_sys::string::{
-        CFStringGetCStringPtr, CFStringRef, kCFStringEncodingUTF8,
+        CFStringGetCString, CFStringGetCStringPtr, CFStringRef, kCFStringEncodingUTF8,
     };
     use std::mem;
     use std::ffi::CStr;
@@ -80,9 +80,18 @@ mod coreaudio_enum {
                 &mut cf_str as *mut _ as *mut _,
             ) != 0 { return None; }
             if cf_str.is_null() { return None; }
+            // CFStringGetCStringPtr may return NULL even for valid strings (e.g. when
+            // the internal storage uses a non-UTF-8 encoding).  Fall back to
+            // CFStringGetCString with a stack buffer in that case.
             let ptr = CFStringGetCStringPtr(cf_str, kCFStringEncodingUTF8);
-            if ptr.is_null() { return None; }
-            Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            if !ptr.is_null() {
+                return Some(CStr::from_ptr(ptr).to_string_lossy().into_owned());
+            }
+            let mut buf = [0i8; 512];
+            if CFStringGetCString(cf_str, buf.as_mut_ptr(), buf.len() as _, kCFStringEncodingUTF8) == 0 {
+                return None;
+            }
+            Some(CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
         }
     }
 
