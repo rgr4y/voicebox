@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPECTED_VENV="$ROOT_DIR/backend/venv"
 EXPECTED_PY="$EXPECTED_VENV/bin/python"
 PORT="${PORT:-17493}"
+HOST="${HOST:-127.0.0.1}"
 
 # Load .env from voicebox/ then ../ (parent wins on conflicts)
 for env_file in "$ROOT_DIR/.env" "$ROOT_DIR/../.env"; do
@@ -34,6 +35,6 @@ echo "[dev-backend-watch] Using python: $EXPECTED_PY"
 
 cd "$ROOT_DIR"
 exec "$EXPECTED_PY" -m backend.main \
-  --host 127.0.0.1 \
+  --host "$HOST" \
   --port "$PORT" \
   --reload
