@@ -20,12 +20,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
 import { BOTTOM_SAFE_AREA_PADDING } from '@/lib/constants/ui';
 import { cn } from '@/lib/utils/cn';
-import { usePlayerStore } from '@/stores/playerStore';
 import { usePlatform } from '@/platform/PlatformContext';
-import { useToast } from '@/components/ui/use-toast';
+import { usePlayerStore } from '@/stores/playerStore';
 
 interface AudioDevice {
   id: string;
@@ -50,7 +50,11 @@ export function AudioTab() {
     queryFn: () => apiClient.listChannels(),
   });
 
-  const { data: devices, isLoading: devicesLoading, refetch: refetchDevices } = useQuery({
+  const {
+    data: devices,
+    isLoading: devicesLoading,
+    refetch: refetchDevices,
+  } = useQuery({
     queryKey: ['audio-devices'],
     queryFn: async () => {
       if (!platform.metadata.isTauri) {
@@ -83,7 +87,7 @@ export function AudioTab() {
     refetchOnWindowFocus: true,
     // Poll every 3 seconds so default input changes are noticed automatically
     refetchInterval: 3000,
-    staleTime: 2000,
+    staleTime: 3000,
   });
 
   const defaultInputDevice = inputDevices?.find((d) => d.is_default);
@@ -100,7 +104,7 @@ export function AudioTab() {
       });
     }
     prevDefaultInputRef.current = defaultInputDevice.name;
-  }, [defaultInputDevice?.name, toast]);
+  }, [defaultInputDevice, toast]);
 
   const { data: profiles } = useQuery({
     queryKey: ['profiles'],
@@ -131,9 +135,7 @@ export function AudioTab() {
         queryClient.setQueryData(
           ['channels'],
           (old: Array<{ id: string; device_ids: string[]; [key: string]: unknown }> | undefined) =>
-            old?.map((ch) =>
-              ch.id === channelId ? { ...ch, device_ids: data.device_ids! } : ch,
-            ),
+            old?.map((ch) => (ch.id === channelId ? { ...ch, device_ids: data.device_ids! } : ch)),
         );
       }
       return { previous };
@@ -353,9 +355,18 @@ export function AudioTab() {
                 className="h-7 w-7"
                 onClick={async () => {
                   setIsRefreshing(true);
-                  await refetchDevices();
-                  setIsRefreshing(false);
-                  toast({ title: 'Devices refreshed', duration: 2000 });
+                  try {
+                    await refetchDevices();
+                    toast({ title: 'Devices refreshed', duration: 2000 });
+                  } catch {
+                    toast({
+                      title: 'Failed to refresh devices',
+                      variant: 'destructive',
+                      duration: 3000,
+                    });
+                  } finally {
+                    setIsRefreshing(false);
+                  }
                 }}
                 title="Refresh output devices"
               >
@@ -372,7 +383,10 @@ export function AudioTab() {
             {defaultInputDevice && (
               <div className="flex items-center gap-1.5 mt-2 text-xs text-muted-foreground">
                 <Mic className="h-3 w-3 shrink-0" />
-                <span>Default input: <span className="font-medium text-foreground">{defaultInputDevice.name}</span></span>
+                <span>
+                  Default input:{' '}
+                  <span className="font-medium text-foreground">{defaultInputDevice.name}</span>
+                </span>
               </div>
             )}
           </div>
@@ -440,7 +454,9 @@ export function AudioTab() {
             <div className="flex flex-col items-center justify-center py-12 border-2 border-dashed border-muted rounded-md">
               <CheckCircle2 className="h-12 w-12 text-muted-foreground mb-4" />
               <p className="text-muted-foreground text-center">
-                {platform.metadata.isTauri ? 'No audio devices found' : 'Audio device selection requires Tauri'}
+                {platform.metadata.isTauri
+                  ? 'No audio devices found'
+                  : 'Audio device selection requires Tauri'}
               </p>
             </div>
           )}

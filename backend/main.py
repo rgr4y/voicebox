@@ -720,18 +720,21 @@ async def generate_speech(
             data.profile_id, db,
         )
 
+        # Don't silently download — require the model to be cached first.
+        # Check before acquiring the lock so we fail fast without blocking.
+        model_size = data.model_size or "1.7B"
+        _tts_model_check = tts.get_tts_model()
+        if not _tts_model_check._is_model_cached(model_size):
+            model_name = f"qwen-tts-{model_size}"
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name} is not downloaded. Please download it first from the Models page.",
+            )
+
         generation_started_at = datetime.utcnow()
         async with _model_lock:
             tts_model = tts.get_tts_model()
             model_size = data.model_size or "1.7B"
-
-            # Don't silently download — require the model to be cached first
-            if not tts_model._is_model_cached(model_size):
-                model_name = f"qwen-tts-{model_size}"
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Model {model_name} is not downloaded. Please download it first from the Models page.",
-                )
 
             await tts_model.load_model_async(model_size)
             save_model_prefs(tts_size=model_size)
