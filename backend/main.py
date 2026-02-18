@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -164,9 +163,8 @@ async def auth_me_stub():
 @app.get("/health", response_model=models.HealthResponse)
 async def health():
     """Health check endpoint."""
-    from huggingface_hub import hf_hub_download, constants as hf_constants
+    from huggingface_hub import constants as hf_constants
     from pathlib import Path
-    import os
 
     tts_model = tts.get_tts_model()
     backend_type = get_backend_type()
@@ -216,8 +214,7 @@ async def health():
         # Check if the default model (1.7B) is cached
         # Use different model IDs based on backend
         if backend_type == "mlx":
-            from .backends.mlx_backend import MLXTTSBackend as _MLXTTSBackend
-            default_model_id = _MLXTTSBackend()._get_model_path("1.7B")
+            default_model_id = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit"
         else:
             default_model_id = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
         
@@ -727,6 +724,15 @@ async def generate_speech(
         async with _model_lock:
             tts_model = tts.get_tts_model()
             model_size = data.model_size or "1.7B"
+
+            # Don't silently download — require the model to be cached first
+            if not tts_model._is_model_cached(model_size):
+                model_name = f"qwen-tts-{model_size}"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Model {model_name} is not downloaded. Please download it first from the Models page.",
+                )
+
             await tts_model.load_model_async(model_size)
             save_model_prefs(tts_size=model_size)
             audio, sample_rate = await tts_model.generate(
@@ -1199,7 +1205,7 @@ async def transcribe_audio(
                 }
             )
 
-        logger.debug(f"[Transcribe] Starting transcription...")
+        logger.debug("[Transcribe] Starting transcription...")
         text = await whisper_model.transcribe(tmp_path, language)
         save_model_prefs(stt_size=model_size)
         logger.debug(f"[Transcribe] Transcription complete: {text[:100] if text else '(empty)'}...")
@@ -1494,14 +1500,14 @@ async def unload_model():
 async def get_model_progress(model_name: str):
     """Get model download progress via Server-Sent Events."""
     from fastapi.responses import StreamingResponse
-    
+
     progress_manager = get_progress_manager()
-    
+
     async def event_generator():
         """Generate SSE events for progress updates."""
         async for event in progress_manager.subscribe(model_name):
             yield event
-    
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -1511,6 +1517,16 @@ async def get_model_progress(model_name: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/models/progress-snapshot/{model_name}")
+async def get_model_progress_snapshot(model_name: str):
+    """Get current model download progress as a single JSON snapshot (for polling)."""
+    progress_manager = get_progress_manager()
+    progress = progress_manager.get_progress(model_name)
+    if progress is None:
+        return {"model_name": model_name, "status": "idle", "current": 0, "total": 0, "progress": 0, "filename": None}
+    return progress
 
 
 @app.get("/models/status", response_model=models.ModelStatusListResponse)
@@ -1640,7 +1656,7 @@ async def get_model_status():
     
     statuses = []
     
-    for config in model_configs:
+    for model_config in model_configs:
         try:
             downloaded = False
             size_mb = None
@@ -1648,7 +1664,7 @@ async def get_model_status():
             
             # Method 1: Try using scan_cache_dir if available
             if cache_info:
-                repo_id = config["hf_repo_id"]
+                repo_id = model_config["hf_repo_id"]
                 for repo in cache_info.repos:
                     if repo.repo_id == repo_id:
                         # Check if actual model weight files exist (not just config files)
@@ -1688,7 +1704,7 @@ async def get_model_status():
             if not downloaded:
                 try:
                     cache_dir = hf_constants.HF_HUB_CACHE
-                    repo_cache = Path(cache_dir) / ("models--" + config["hf_repo_id"].replace("/", "--"))
+                    repo_cache = Path(cache_dir) / ("models--" + model_config["hf_repo_id"].replace("/", "--"))
                     
                     if repo_cache.exists():
                         # Check for .incomplete files - if any exist, download is still in progress
@@ -1728,13 +1744,13 @@ async def get_model_status():
             
             # Check if loaded in memory
             try:
-                loaded = config["check_loaded"]()
+                loaded = model_config["check_loaded"]()
             except Exception:
                 loaded = False
-            
+
             # Check if this model (or its shared repo) is currently being downloaded
-            is_downloading = config["hf_repo_id"] in active_download_repos
-            
+            is_downloading = model_config["hf_repo_id"] in active_download_repos
+
             # If downloading, don't report as downloaded (partial files exist)
             if is_downloading:
                 downloaded = False
@@ -1743,35 +1759,35 @@ async def get_model_status():
             # If no size from disk, query HuggingFace API
             if size_mb is None and not is_downloading:
                 from .utils.hf_sizes import get_repo_size_mb
-                size_mb = await get_repo_size_mb(config["hf_repo_id"])
+                size_mb = await get_repo_size_mb(model_config["hf_repo_id"])
 
             statuses.append(models.ModelStatus(
-                model_name=config["model_name"],
-                display_name=config["display_name"],
+                model_name=model_config["model_name"],
+                display_name=model_config["display_name"],
                 downloaded=downloaded,
                 downloading=is_downloading,
                 size_mb=size_mb,
                 loaded=loaded,
             ))
-        except Exception as e:
+        except Exception:
             # If check fails, try to at least check if loaded
             try:
-                loaded = config["check_loaded"]()
+                loaded = model_config["check_loaded"]()
             except Exception:
                 loaded = False
-            
+
             # Check if this model (or its shared repo) is currently being downloaded
-            is_downloading = config["hf_repo_id"] in active_download_repos
+            is_downloading = model_config["hf_repo_id"] in active_download_repos
 
             # If not downloading, try to get size from HuggingFace API
             size_mb = None
             if not is_downloading:
                 from .utils.hf_sizes import get_repo_size_mb
-                size_mb = await get_repo_size_mb(config["hf_repo_id"])
+                size_mb = await get_repo_size_mb(model_config["hf_repo_id"])
 
             statuses.append(models.ModelStatus(
-                model_name=config["model_name"],
-                display_name=config["display_name"],
+                model_name=model_config["model_name"],
+                display_name=model_config["display_name"],
                 downloaded=False,  # Assume not downloaded if check failed
                 downloading=is_downloading,
                 size_mb=size_mb,
@@ -1884,7 +1900,6 @@ async def cancel_model_download(model_name: str):
 async def delete_model(model_name: str):
     """Delete a downloaded model from the HuggingFace cache."""
     import shutil
-    import os
     from huggingface_hub import constants as hf_constants
     
     # Map model names to HuggingFace repo IDs
@@ -1969,7 +1984,7 @@ async def clear_cache():
     try:
         deleted_count = clear_voice_prompt_cache()
         return {
-            "message": f"Voice prompt cache cleared successfully",
+            "message": "Voice prompt cache cleared successfully",
             "files_deleted": deleted_count,
         }
     except Exception as e:
@@ -2231,6 +2246,12 @@ async def _job_worker():
                     )
 
                     tts_model = tts.get_tts_model()
+
+                    # Don't silently download — require the model to be cached first
+                    if not tts_model._is_model_cached(model_size):
+                        model_name = f"qwen-tts-{model_size}"
+                        raise ValueError(f"Model {model_name} is not downloaded. Please download it first from the Models page.")
+
                     await tts_model.load_model_async(model_size)
                     save_model_prefs(tts_size=model_size)
 
@@ -2372,7 +2393,6 @@ async def _preload_models():
     """Preload TTS and STT models based on saved preferences."""
     prefs = _load_model_prefs()
     tts_size = prefs.get("tts_model_size", "1.7B")
-    stt_size = prefs.get("stt_model_size", "base")
 
     # Preload TTS model
     try:
