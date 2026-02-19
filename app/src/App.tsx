@@ -93,6 +93,9 @@ function App() {
 
     serverStartingRef.current = true;
 
+    // Port 17493 is intentionally hardcoded — the Rust sidecar always binds to it
+    // (see SERVER_PORT in main.rs). Not configurable, not a dynamic assignment.
+    // AbortSignal.timeout() is available in all Tauri-bundled webviews (WKWebView/WebView2).
     const SERVER_URL = 'http://127.0.0.1:17493';
 
     // Check if a server is already running before trying to start one.

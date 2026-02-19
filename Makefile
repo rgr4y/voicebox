@@ -58,6 +58,8 @@ setup-python: $(VENV)/bin/activate ## Set up Python virtual environment and depe
 		$(PIP) install -r /tmp/voicebox-requirements-filtered.txt; \
 		rm /tmp/voicebox-requirements-filtered.txt; \
 		$(PIP) install --no-deps git+https://github.com/QwenLM/Qwen3-TTS.git; \
+		# --no-deps is intentional: qwen-tts deps conflict with mlx-audio's pinned transformers. \
+		# All required deps are already installed via requirements.txt + requirements-mlx.txt. \
 		echo -e "$(GREEN)✓ MLX backend enabled (native Metal acceleration)$(NC)"; \
 		echo -e "$(YELLOW)Note: Using transformers 5.0.0rc3 (required by MLX)$(NC)"; \
 	else \

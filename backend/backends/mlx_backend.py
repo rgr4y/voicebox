@@ -150,6 +150,7 @@ class MLXTTSBackend:
                 self._load_model_sync(model_size, is_cached)
 
         await asyncio.to_thread(_locked_load)
+        # touch() is a no-op when timeout <= 0 (serverless mode) — cheap call, intentional.
         self._idle_timer.touch()
 
     # Alias for compatibility

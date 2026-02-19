@@ -256,7 +256,7 @@ def configure_json_logging(log_level: str | None = None) -> None:
     import threading
     _thread_logger = logging.getLogger("threading")
 
-    def _thread_excepthook(args):
+    def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
         if args.exc_type is KeyboardInterrupt:
             return
         _thread_logger.error(

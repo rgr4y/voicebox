@@ -3,7 +3,10 @@ Task tracking for active downloads and generations.
 """
 
 import asyncio
+import logging
 from typing import Optional, Dict, List
+
+logger = logging.getLogger(__name__)
 from datetime import datetime
 from dataclasses import dataclass, field
 
@@ -38,6 +41,7 @@ class TaskManager:
     def start_download(self, model_name: str, asyncio_task: Optional[asyncio.Task] = None) -> None:
         """Mark a download as started. Does not overwrite an existing entry (preserves asyncio_task)."""
         if model_name in self._active_downloads:
+            logger.debug("start_download: %s already tracked, skipping (preserves asyncio_task)", model_name)
             return
         self._active_downloads[model_name] = DownloadTask(
             model_name=model_name,

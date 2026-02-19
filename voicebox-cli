@@ -956,7 +956,9 @@ def resolve_profile(base_url, voice_name):
         print("Import one with: voicebox import <file.zip>", file=sys.stderr)
         sys.exit(1)
 
-    # Fall back to last-used voice when none specified
+    # Fall back to last-used voice when none specified.
+    # If last_voice is stale (profile was deleted), the match below will find nothing
+    # and exit with a clear "no voice matching" error listing available profiles.
     if not voice_name:
         voice_name = load_cli_config().get("last_voice")
         if voice_name:

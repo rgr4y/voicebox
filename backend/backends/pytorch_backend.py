@@ -346,7 +346,9 @@ class PyTorchTTSBackend:
         # Load model
         await self.load_model_async(None)
 
-        # Capture model reference now — before any concurrent load can swap self.model
+        # Capture model reference before entering the thread — load_model_async is
+        # serialised by _MLX_LOAD_LOCK equivalent so concurrent swaps can't happen
+        # mid-generation, but capturing here makes the intent explicit.
         _model = self.model
 
         def _generate_sync():

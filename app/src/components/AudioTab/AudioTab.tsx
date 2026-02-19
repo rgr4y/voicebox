@@ -92,7 +92,8 @@ export function AudioTab() {
 
   const defaultInputDevice = inputDevices?.find((d) => d.is_default);
 
-  // Toast when default input device changes
+  // Toast when default input device changes.
+  // prevDefaultInputRef starts null — the null check prevents a toast on first render/mount.
   useEffect(() => {
     if (!defaultInputDevice) return;
     const prev = prevDefaultInputRef.current;

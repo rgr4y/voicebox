@@ -3,8 +3,8 @@ import { useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { toast } from '@/components/ui/use-toast';
-import type { ModelProgress } from '@/lib/api/types';
 import { apiClient } from '@/lib/api/client';
+import type { ModelProgress } from '@/lib/api/types';
 import { useServerStore } from '@/stores/serverStore';
 
 const POLL_MS = 1000;
@@ -68,7 +68,11 @@ export function useModelDownloadToast({
 
     const handleCancel = async () => {
       stopped = true;
-      try { await apiClient.cancelModelDownload(modelName); } catch { /* ignore */ }
+      try {
+        await apiClient.cancelModelDownload(modelName);
+      } catch {
+        /* ignore */
+      }
       dismissToast();
       onCancelRef.current?.();
     };
@@ -110,7 +114,13 @@ export function useModelDownloadToast({
               <span>{displayNameRef.current}</span>
             </div>
             {showCancel && (
-              <Button size="sm" variant="ghost" className="h-5 w-5 p-0 shrink-0" onClick={handleCancel} title="Cancel">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-5 w-5 p-0 shrink-0"
+                onClick={handleCancel}
+                title="Cancel"
+              >
                 <X className="h-3 w-3" />
               </Button>
             )}
@@ -119,8 +129,8 @@ export function useModelDownloadToast({
         description: (
           <div className="space-y-2">
             <div className="text-sm">{statusText}</div>
-            {status !== 'loading' && (
-              hasTotal ? (
+            {status !== 'loading' &&
+              (hasTotal ? (
                 <>
                   <Progress value={progressPercent} className="h-2" />
                   <div className="text-xs text-muted-foreground">{progressText}</div>
@@ -129,14 +139,17 @@ export function useModelDownloadToast({
                 <div className="h-2 w-full rounded-full bg-secondary overflow-hidden">
                   <div className="h-full w-1/3 rounded-full bg-primary animate-[indeterminate_1.5s_ease-in-out_infinite]" />
                 </div>
-              )
-            )}
+              ))}
           </div>
         ),
         duration: isTerminal ? 4000 : Infinity,
         variant: status === 'error' ? 'destructive' : 'default',
       });
     };
+
+    // Declare before poll so the closure reference is always valid,
+    // and so the cleanup function can reliably cancel any pending timeout.
+    let intervalId: number | undefined;
 
     // Poll loop
     const poll = async () => {
@@ -172,7 +185,7 @@ export function useModelDownloadToast({
       if (!stopped) intervalId = window.setTimeout(poll, POLL_MS);
     };
 
-    let intervalId = window.setTimeout(poll, POLL_MS);
+    intervalId = window.setTimeout(poll, POLL_MS);
 
     return () => {
       stopped = true;
