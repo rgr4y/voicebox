@@ -157,7 +157,7 @@ class _AccessLogFilter(logging.Filter):
                 "status":  args[4],
             }
             record.subtype = ["http"]
-            record.msg = ""
+            record.msg = "%s %s %s" % (args[1], args[2], args[4])
             record.args = None
         return True
 
@@ -274,3 +274,25 @@ def configure_json_logging(log_level: str | None = None) -> None:
     # Swallow raw stderr noise from uvloop shutdown tracebacks
     if not isinstance(sys.stderr, _FilteredStderr):
         sys.stderr = _FilteredStderr(sys.stderr)
+
+
+def configure_log_file(path: str) -> None:
+    """Attach a FileHandler to the root logger so all JSON logs also go to *path*.
+
+    Call this after argparse (i.e. after ``configure_json_logging()`` has already
+    set up the stderr handler).  The file gets the same JSON formatter used for
+    stderr, so the output is identical and machine-parseable.
+    """
+    formatter = _CleanJsonFormatter(
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+        rename_fields={"asctime": "ts", "levelname": "level", "name": "logger"},
+    )
+
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(formatter)
+    handler.addFilter(_SubtypeFilter())
+
+    root = logging.getLogger()
+    root.addHandler(handler)
+
+    root.info("Log file opened: %s", path)

@@ -52,8 +52,12 @@ export interface PlatformAudio {
 export interface PlatformLifecycle {
   startServer(remote?: boolean): Promise<string>;
   stopServer(): Promise<void>;
+  restartServer(): Promise<string>;
   setKeepServerRunning(keep: boolean): Promise<void>;
   setupWindowCloseHandler(): Promise<void>;
+  openConsoleLogs(): Promise<void>;
+  /** Subscribe to server log lines emitted from the sidecar. Returns unsubscribe fn. */
+  onServerLog(callback: (line: string) => void): Promise<() => void>;
   onServerReady?: () => void;
 }
 

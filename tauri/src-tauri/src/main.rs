@@ -287,6 +287,8 @@ async fn start_server(
     let start_time = tokio::time::Instant::now();
     let mut error_output = Vec::new();
 
+    let app_for_emit = app.clone();
+
     loop {
         if start_time.elapsed() > timeout {
             eprintln!("Server startup timeout after 120 seconds");
@@ -321,6 +323,7 @@ async fn start_server(
                     tauri_plugin_shell::process::CommandEvent::Stdout(line) => {
                         let line_str = String::from_utf8_lossy(&line);
                         println!("Server output: {}", line_str);
+                        let _ = app_for_emit.emit("server-log", line_str.as_ref());
 
                         if line_str.contains("Uvicorn running") || line_str.contains("Application startup complete") {
                             println!("Server is ready!");
@@ -330,6 +333,7 @@ async fn start_server(
                     tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
                         let line_str = String::from_utf8_lossy(&line).to_string();
                         eprintln!("Server: {}", line_str);
+                        let _ = app_for_emit.emit("server-log", &line_str);
 
                         // Collect error lines for debugging
                         if line_str.contains("ERROR") || line_str.contains("Error") || line_str.contains("Failed") {
@@ -390,15 +394,19 @@ async fn start_server(
         }
     }
 
-    // Spawn task to continue reading output
+    // Spawn task to continue reading output and emitting to frontend
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 tauri_plugin_shell::process::CommandEvent::Stdout(line) => {
-                    println!("Server: {}", String::from_utf8_lossy(&line));
+                    let line_str = String::from_utf8_lossy(&line);
+                    println!("Server: {}", line_str);
+                    let _ = app_for_emit.emit("server-log", line_str.as_ref());
                 }
                 tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
-                    eprintln!("Server error: {}", String::from_utf8_lossy(&line));
+                    let line_str = String::from_utf8_lossy(&line);
+                    eprintln!("Server: {}", line_str);
+                    let _ = app_for_emit.emit("server-log", line_str.as_ref());
                 }
                 _ => {}
             }
@@ -549,9 +557,169 @@ async fn stop_server(state: State<'_, ServerState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Check if the server port is free.
+fn port_is_free() -> bool {
+    std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", SERVER_PORT).parse().unwrap(),
+        std::time::Duration::from_millis(50),
+    ).is_err()
+}
+
+/// Identify what process is listening on SERVER_PORT.
+/// Returns (process_name, pid) or None if nothing found / not supported.
+#[cfg(unix)]
+fn identify_port_owner() -> Option<(String, u32)> {
+    use std::process::Command;
+    if let Ok(output) = Command::new("lsof")
+        .args(["-i", &format!(":{}", SERVER_PORT), "-sTCP:LISTEN"])
+        .output()
+    {
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        for line in output_str.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(pid) = parts[1].parse::<u32>() {
+                    return Some((parts[0].to_string(), pid));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn identify_port_owner() -> Option<(String, u32)> {
+    use std::process::Command;
+    // netstat -ano to find the PID on our port
+    if let Ok(output) = Command::new("netstat").args(["-ano"]).output() {
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        for line in output_str.lines() {
+            if line.contains(&format!(":{}", SERVER_PORT)) && line.contains("LISTENING") {
+                if let Some(pid_str) = line.split_whitespace().last() {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        // Resolve PID to process name via tasklist
+                        if let Ok(tasklist) = Command::new("tasklist")
+                            .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+                            .output()
+                        {
+                            let name_str = String::from_utf8_lossy(&tasklist.stdout);
+                            let name = name_str.trim()
+                                .split(',').next()
+                                .unwrap_or("unknown")
+                                .trim_matches('"')
+                                .to_string();
+                            return Some((name, pid));
+                        }
+                        return Some(("unknown".to_string(), pid));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn identify_port_owner() -> Option<(String, u32)> {
+    None
+}
+
+#[command]
+async fn restart_server(
+    app: tauri::AppHandle,
+    state: State<'_, ServerState>,
+) -> Result<String, String> {
+    println!("restart_server: Phase 1 — graceful shutdown via POST /shutdown");
+
+    // Phase 1: HTTP shutdown request
+    let shutdown_sent = tokio::task::spawn_blocking(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .ok()
+            .and_then(|c| c.post(&format!("http://127.0.0.1:{}/shutdown", SERVER_PORT)).send().ok())
+            .is_some()
+    }).await.unwrap_or(false);
+
+    if shutdown_sent {
+        println!("restart_server: Shutdown request sent, waiting up to 10s for port to free...");
+        for _ in 0..100 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            if port_is_free() {
+                println!("restart_server: Port freed after graceful shutdown");
+                // Clean up state references since the process exited on its own
+                let _ = state.child.lock().unwrap().take();
+                let _ = state.server_pid.lock().unwrap().take();
+                println!("restart_server: Starting server...");
+                return start_server(app, state, None).await;
+            }
+        }
+        println!("restart_server: Graceful shutdown timed out");
+    } else {
+        println!("restart_server: HTTP shutdown failed (server may be unresponsive)");
+    }
+
+    // Phase 2: SIGKILL via stop_server
+    println!("restart_server: Phase 2 — force kill");
+    stop_server(state.clone()).await?;
+
+    // Wait up to 10s for port to free after kill
+    println!("restart_server: Waiting up to 10s for port to free after kill...");
+    for _ in 0..100 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        if port_is_free() {
+            println!("restart_server: Port freed after force kill");
+            println!("restart_server: Starting server...");
+            return start_server(app, state, None).await;
+        }
+    }
+
+    // Phase 3: Port still occupied — identify what's there
+    match identify_port_owner() {
+        Some((name, pid)) if name.contains("voicebox") => {
+            println!("restart_server: Zombie voicebox-server (PID {}) still holding port {}", pid, SERVER_PORT);
+            Err(format!("A voicebox-server process (PID {}) is still holding port {} after shutdown — it may need to be killed manually", pid, SERVER_PORT))
+        }
+        Some((name, pid)) => {
+            println!("restart_server: Non-voicebox process '{}' (PID {}) is on port {}", name, pid, SERVER_PORT);
+            Err(format!("Port {} is in use by '{}' (PID {}) — not a voicebox process", SERVER_PORT, name, pid))
+        }
+        None => {
+            println!("restart_server: Port {} still occupied, could not identify owner", SERVER_PORT);
+            Err(format!("Port {} is still in use after shutdown", SERVER_PORT))
+        }
+    }
+}
+
 #[command]
 fn set_keep_server_running(state: State<'_, ServerState>, keep_running: bool) {
     *state.keep_running_on_close.lock().unwrap() = keep_running;
+}
+
+/// Open a Terminal window streaming voicebox-server logs (macOS only).
+#[command]
+fn open_console_logs() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // Open Terminal.app running `log stream` filtered to voicebox-server
+        Command::new("osascript")
+            .args([
+                "-e",
+                r#"tell application "Terminal"
+    activate
+    do script "log stream --predicate 'process == \"voicebox-server\"' --level info"
+end tell"#,
+            ])
+            .spawn()
+            .map_err(|e| format!("Failed to open Terminal with log stream: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Log streaming is only available on macOS".to_string())
+    }
 }
 
 #[command]
@@ -647,7 +815,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_server,
             stop_server,
+            restart_server,
             set_keep_server_running,
+            open_console_logs,
             start_system_audio_capture,
             stop_system_audio_capture,
             is_system_audio_supported,

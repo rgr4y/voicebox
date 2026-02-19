@@ -65,10 +65,21 @@ if __name__ == "__main__":
             default=None,
             help="Data directory for database, profiles, and generated audio",
         )
+        parser.add_argument(
+            "--log-file",
+            type=str,
+            default=None,
+            help="Also write JSON logs to this file",
+        )
         # Use parse_known_args to tolerate extra args from multiprocessing
         # resource tracker (-B -S -I -c ...) on PyInstaller bundles
         args, _unknown = parser.parse_known_args()
         logger.info(f"Parsed arguments: host={args.host}, port={args.port}, data_dir={args.data_dir}")
+
+        # Set up log file if requested
+        if args.log_file:
+            from backend.utils.logging_config import configure_log_file
+            configure_log_file(args.log_file)
 
         # Set data directory if provided
         if args.data_dir:

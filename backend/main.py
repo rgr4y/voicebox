@@ -2495,6 +2495,12 @@ if __name__ == "__main__":
         help="Data directory for database, profiles, and generated audio",
     )
     parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Also write JSON logs to this file",
+    )
+    parser.add_argument(
         "--reload",
         action="store_true",
         default=False,
@@ -2504,6 +2510,11 @@ if __name__ == "__main__":
 
     from backend.utils.logging_config import configure_json_logging
     configure_json_logging()
+
+    # Set up log file if requested
+    if args.log_file:
+        from backend.utils.logging_config import configure_log_file
+        configure_log_file(args.log_file)
 
     # Set data directory if provided
     if args.data_dir:

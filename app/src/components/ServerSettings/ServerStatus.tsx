@@ -1,15 +1,22 @@
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, XCircle } from 'lucide-react';
+import { Loader2, RefreshCw, Terminal, XCircle } from 'lucide-react';
+import { useState } from 'react';
+import { ServerLogViewer } from '@/components/ServerLogViewer/ServerLogViewer';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { apiClient } from '@/lib/api/client';
 import { useServerHealth } from '@/lib/hooks/useServer';
+import { usePlatform } from '@/platform/PlatformContext';
 import { useServerStore } from '@/stores/serverStore';
 import { ModelProgress } from './ModelProgress';
 
 export function ServerStatus() {
   const { data: health, isLoading, error } = useServerHealth();
   const serverUrl = useServerStore((state) => state.serverUrl);
+  const platform = usePlatform();
+  const [restarting, setRestarting] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
 
   const { data: modelStatusData } = useQuery({
     queryKey: ['modelStatus'],
@@ -18,6 +25,18 @@ export function ServerStatus() {
   });
 
   const models = modelStatusData?.models ?? [];
+
+  const handleRestart = async () => {
+    setRestarting(true);
+    try {
+      const url = await platform.lifecycle.restartServer();
+      useServerStore.getState().setServerUrl(url);
+    } catch (err) {
+      console.error('Failed to restart server:', err);
+    } finally {
+      setRestarting(false);
+    }
+  };
 
   return (
     <Card>
@@ -33,7 +52,11 @@ export function ServerStatus() {
         {/* Model download progress */}
         <div className="space-y-2">
           {models.map((m) => (
-            <ModelProgress key={m.model_name} modelName={m.model_name} displayName={m.display_name} />
+            <ModelProgress
+              key={m.model_name}
+              modelName={m.model_name}
+              displayName={m.display_name}
+            />
           ))}
         </div>
 
@@ -67,7 +90,25 @@ export function ServerStatus() {
             </div>
           </div>
         ) : null}
+
+        {platform.metadata.isTauri && (
+          <div className="flex gap-2 pt-1">
+            <Button variant="outline" size="sm" disabled={restarting} onClick={handleRestart}>
+              {restarting ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4 mr-2" />
+              )}
+              {restarting ? 'Restarting...' : 'Restart Server'}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setLogsOpen(true)}>
+              <Terminal className="h-4 w-4 mr-2" />
+              View Server Logs
+            </Button>
+          </div>
+        )}
       </CardContent>
+      <ServerLogViewer open={logsOpen} onOpenChange={setLogsOpen} />
     </Card>
   );
 }

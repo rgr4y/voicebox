@@ -5,6 +5,7 @@ import { usePlatform } from '@/platform/PlatformContext';
 
 export function ServerTab() {
   const platform = usePlatform();
+
   return (
     <div className="space-y-4 overflow-y-auto flex flex-col">
       <div className="grid gap-4 md:grid-cols-2">

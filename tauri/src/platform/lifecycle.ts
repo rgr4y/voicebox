@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
-import { listen, emit } from '@tauri-apps/api/event';
+import type { UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import type { PlatformLifecycle } from '@/platform/types';
 
 class TauriLifecycle implements PlatformLifecycle {
@@ -27,12 +28,39 @@ class TauriLifecycle implements PlatformLifecycle {
     }
   }
 
+  async restartServer(): Promise<string> {
+    try {
+      const result = await invoke<string>('restart_server');
+      console.log('Server restarted:', result);
+      this.onServerReady?.();
+      return result;
+    } catch (error) {
+      console.error('Failed to restart server:', error);
+      throw error;
+    }
+  }
+
   async setKeepServerRunning(keepRunning: boolean): Promise<void> {
     try {
       await invoke('set_keep_server_running', { keepRunning });
     } catch (error) {
       console.error('Failed to set keep server running setting:', error);
     }
+  }
+
+  async openConsoleLogs(): Promise<void> {
+    try {
+      await invoke('open_console_logs');
+    } catch (error) {
+      console.error('Failed to open Console.app:', error);
+    }
+  }
+
+  async onServerLog(callback: (line: string) => void): Promise<() => void> {
+    const unlisten: UnlistenFn = await listen<string>('server-log', (event) => {
+      callback(event.payload);
+    });
+    return unlisten;
   }
 
   async setupWindowCloseHandler(): Promise<void> {

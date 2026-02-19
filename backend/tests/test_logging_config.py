@@ -254,6 +254,45 @@ class TestJsonLoggingConfig(unittest.TestCase):
         self.assertIsInstance(row.get("subtype"), list)
 
     # ------------------------------------------------------------------
+    # 3b. Access log (uvicorn.access) — message is always populated
+    # ------------------------------------------------------------------
+
+    def test_access_log_message_populated(self):
+        """uvicorn.access records must have a non-empty message field.
+
+        The _AccessLogFilter unpacks the 5-tuple args into an ``http``
+        field AND formats a human-readable message string so consumers
+        (like the frontend log viewer) never see a blank message.
+        """
+        buf = _install_logging()
+        access_logger = logging.getLogger("uvicorn.access")
+
+        # Simulate what uvicorn does: msg with %-format args as a 5-tuple
+        access_logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:54321",
+            "GET",
+            "/health",
+            "1.1",
+            200,
+        )
+
+        row = _last(buf)
+        # message must not be empty
+        self.assertTrue(row.get("message"), "Access log message must not be blank")
+        self.assertIn("GET", row["message"])
+        self.assertIn("/health", row["message"])
+        self.assertIn("200", row["message"])
+
+        # http field must still be present with structured data
+        http = row.get("http")
+        self.assertIsNotNone(http, "Access log must have http field")
+        self.assertEqual(http["method"], "GET")
+        self.assertEqual(http["path"], "/health")
+        self.assertEqual(http["status"], 200)
+        self.assertEqual(row.get("subtype"), ["http"])
+
+    # ------------------------------------------------------------------
     # 4. print() → stdout wrapper
     # ------------------------------------------------------------------
 
@@ -403,7 +442,159 @@ class TestJsonLoggingConfig(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # 7. Every output line is valid JSON (smoke test)
+    # 7. configure_log_file()
+    # ------------------------------------------------------------------
+
+    def test_log_file_creates_file_and_writes_json(self):
+        """configure_log_file() should append a FileHandler that writes valid JSON."""
+        import tempfile
+        import os
+
+        buf = _install_logging()
+        logger = logging.getLogger("test.logfile")
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+            log_path = f.name
+
+        try:
+            from backend.utils.logging_config import configure_log_file
+            configure_log_file(log_path)
+
+            logger.info("file log entry")
+            logger.warning("file warning", extra={"key": "val"})
+
+            # Flush all handlers
+            for h in logging.getLogger().handlers:
+                h.flush()
+
+            with open(log_path) as f:
+                lines = [l.strip() for l in f if l.strip()]
+
+            self.assertGreaterEqual(len(lines), 2, "Expected at least 2 lines in log file")
+            for line in lines:
+                row = json.loads(line)
+                self.assertIn("ts", row)
+                self.assertIn("level", row)
+                self.assertIn("message", row)
+
+            # Verify our specific messages made it
+            messages = [json.loads(l)["message"] for l in lines]
+            self.assertTrue(any("file log entry" in m for m in messages))
+            self.assertTrue(any("file warning" in m for m in messages))
+
+            # Verify extra fields pass through to file handler
+            warning_rows = [json.loads(l) for l in lines if "file warning" in l]
+            self.assertTrue(warning_rows)
+            self.assertEqual(warning_rows[0].get("key"), "val")
+        finally:
+            os.unlink(log_path)
+
+    def test_log_file_also_writes_to_stderr(self):
+        """Adding a file handler must not break the existing stderr handler."""
+        import tempfile
+        import os
+
+        buf = _install_logging()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+            log_path = f.name
+
+        try:
+            from backend.utils.logging_config import configure_log_file
+            configure_log_file(log_path)
+
+            logger = logging.getLogger("test.dual")
+            logger.info("dual output test")
+
+            # Should appear in stderr buffer too
+            row = _last(buf)
+            self.assertIn("dual output test", row.get("message", ""))
+        finally:
+            os.unlink(log_path)
+
+    def test_log_file_subtype_filter_applied(self):
+        """The file handler should also get subtype annotations."""
+        import tempfile
+        import os
+
+        _install_logging()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+            log_path = f.name
+
+        try:
+            from backend.utils.logging_config import configure_log_file
+            configure_log_file(log_path)
+
+            logger = logging.getLogger("test.file_subtype")
+            logger.info("[TTS] model loaded via file")
+
+            for h in logging.getLogger().handlers:
+                h.flush()
+
+            with open(log_path) as f:
+                lines = [l.strip() for l in f if l.strip()]
+
+            tts_rows = [json.loads(l) for l in lines if "model loaded via file" in l]
+            self.assertTrue(tts_rows, "Expected TTS log line in file")
+            self.assertEqual(tts_rows[0].get("subtype"), ["tts"])
+            # Prefix should be stripped
+            self.assertEqual(tts_rows[0]["message"], "model loaded via file")
+        finally:
+            os.unlink(log_path)
+
+    # ------------------------------------------------------------------
+    # 8. Timestamp format — must be parseable by the frontend
+    # ------------------------------------------------------------------
+
+    def test_ts_format_parseable_by_javascript(self):
+        """The 'ts' field must be in a format the frontend can parse.
+
+        Python logging emits "2026-02-19 12:34:56,789" (comma before ms).
+        The frontend normalises comma→dot before parsing.  Verify the
+        format is consistent across both the JSON formatter and the
+        _JsonStdout wrapper so the viewer never shows "Invalid Date".
+        """
+        import re
+
+        # Expected pattern: YYYY-MM-DD HH:MM:SS,mmm
+        ts_re = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}$")
+
+        # 1) Standard logger → _CleanJsonFormatter
+        buf = _install_logging()
+        logger = logging.getLogger("test.ts_format")
+        logger.info("ts check")
+        row = _last(buf)
+        ts = row.get("ts", "")
+        self.assertRegex(ts, ts_re,
+            f"Formatter ts {ts!r} doesn't match YYYY-MM-DD HH:MM:SS,mmm")
+
+        # Verify comma→dot normalisation produces a valid ISO-ish datetime
+        normalised = ts.replace(",", ".")
+        from datetime import datetime as dt
+        parsed = dt.strptime(normalised, "%Y-%m-%d %H:%M:%S.%f")
+        self.assertIsNotNone(parsed)
+
+        # 2) _JsonStdout wrapper (print → JSON)
+        import backend.utils.logging_config as lc
+        buf_out = io.StringIO()
+        real_stdout = sys.stdout
+        if isinstance(sys.stdout, lc._JsonStdout):
+            sys.stdout._real = buf_out
+        try:
+            print("stdout ts check")
+        finally:
+            sys.stdout = real_stdout
+
+        output = buf_out.getvalue().strip()
+        if output:
+            stdout_row = json.loads(output)
+            stdout_ts = stdout_row.get("ts", "")
+            self.assertRegex(stdout_ts, ts_re,
+                f"_JsonStdout ts {stdout_ts!r} doesn't match YYYY-MM-DD HH:MM:SS,mmm")
+
+    # ------------------------------------------------------------------
+    # 9. Every output line is valid JSON (smoke test)
     # ------------------------------------------------------------------
 
     def test_all_output_is_valid_json(self):
