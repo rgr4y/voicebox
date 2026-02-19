@@ -33,7 +33,17 @@ fn main() {
 
         std::fs::create_dir_all(&gen_dir).expect("Failed to create gen directory");
 
-        if std::path::Path::new(&icon_source).exists() {
+        // Icon compilation requires sudo xcode-select and full Xcode.
+        // Skip unless explicitly opted in via env var or running on a known dev machine.
+        let hostname = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        let is_dev_machine = hostname.trim().starts_with("mimi");
+        let compile_icons = std::env::var("VOICEBOX_COMPILE_ICONS").is_ok() || is_dev_machine;
+
+        if std::path::Path::new(&icon_source).exists() && compile_icons {
             println!("cargo:rerun-if-changed={}", icon_source);
             println!("cargo:rerun-if-changed={}/icon.json", icon_source);
             println!("cargo:rerun-if-changed={}/Assets", icon_source);
@@ -115,6 +125,8 @@ fn main() {
                     println!("cargo:warning=Icon compilation skipped - continuing without custom icon");
                 }
             }
+        } else if !compile_icons {
+            println!("cargo:warning=Icon compilation skipped (set VOICEBOX_COMPILE_ICONS=1 to enable)");
         } else {
             println!(
                 "cargo:warning=Icon source not found at {}, skipping icon compilation",

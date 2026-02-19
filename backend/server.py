@@ -12,12 +12,9 @@ import os
 import sys
 import logging
 
-# Set up logging FIRST, before any imports that might fail
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stderr,  # Log to stderr so it's captured by Tauri
-)
+# Set up JSON logging FIRST, before any imports that might fail
+from backend.utils.logging_config import configure_json_logging
+configure_json_logging()
 logger = logging.getLogger(__name__)
 
 # Log startup immediately to confirm binary execution
@@ -68,10 +65,21 @@ if __name__ == "__main__":
             default=None,
             help="Data directory for database, profiles, and generated audio",
         )
+        parser.add_argument(
+            "--log-file",
+            type=str,
+            default=None,
+            help="Also write JSON logs to this file",
+        )
         # Use parse_known_args to tolerate extra args from multiprocessing
         # resource tracker (-B -S -I -c ...) on PyInstaller bundles
         args, _unknown = parser.parse_known_args()
         logger.info(f"Parsed arguments: host={args.host}, port={args.port}, data_dir={args.data_dir}")
+
+        # Set up log file if requested
+        if args.log_file:
+            from backend.utils.logging_config import configure_log_file
+            configure_log_file(args.log_file)
 
         # Set data directory if provided
         if args.data_dir:
@@ -90,6 +98,7 @@ if __name__ == "__main__":
             host=args.host,
             port=args.port,
             log_level=_log_level,
+            log_config=None,  # Don't let uvicorn overwrite our JSON logging config
         )
     except Exception as e:
         logger.error(f"Server startup failed: {e}", exc_info=True)

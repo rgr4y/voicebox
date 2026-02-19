@@ -31,6 +31,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from . import TTSBackend, STTBackend
+from .. import model_registry
 from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
 from ..utils.audio import normalize_audio, load_audio
 from ..utils.progress import get_progress_manager
@@ -51,7 +52,7 @@ _MLX_LOAD_LOCK = threading.Lock()
 class MLXTTSBackend:
     """MLX-based TTS backend using mlx-audio."""
 
-    def __init__(self, model_size: str = "1.7B"):
+    def __init__(self, model_size: str = model_registry.DEFAULT_MODEL_SIZE):
         self.model = None
         self.model_size = model_size
         self._current_model_size = None
@@ -68,28 +69,16 @@ class MLXTTSBackend:
     def _get_model_path(self, model_size: str) -> str:
         """
         Get the MLX model path.
-        
+
         Args:
-            model_size: Model size (1.7B or 0.6B)
-            
+            model_size: Model size (e.g. 1.7B or 0.6B)
+
         Returns:
             HuggingFace Hub model ID for MLX
         """
-        # MLX model mapping.
-        # Use Base variants — these accept ref_audio/ref_text for voice cloning.
-        # CustomVoice variants require a named speaker ('Chelsie', 'Ethan', etc.)
-        # and don't support arbitrary voice cloning.
-        # 4-bit quantized: ~900MB (1.7B) / ~300MB (0.6B) vs ~3.4GB for bf16.
-        mlx_model_map = {
-            "1.7B": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit",
-            "0.6B": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit",
-        }
-        
-        if model_size not in mlx_model_map:
+        if not model_registry.is_valid_size(model_size):
             raise ValueError(f"Unknown model size: {model_size}")
-        
-        hf_model_id = mlx_model_map[model_size]
-        return hf_model_id
+        return model_registry.get_hf_repo(model_size, "mlx")
 
     def _is_model_cached(self, model_size: str) -> bool:
         """
@@ -153,7 +142,7 @@ class MLXTTSBackend:
             with _MLX_LOAD_LOCK:
                 # Re-check inside the lock — another caller may have loaded while we waited
                 if self.model is not None and self._current_model_size == model_size:
-                    logger.debug(f"[TTS] Load skipped — model {model_size} already loaded by concurrent caller")
+                    logger.debug(f"[TTS] Load skipped — model {model_size} already loaded by concurrent caller", extra={"subtype": ["engine", "tts"]})
                     return
                 if self.model is not None and self._current_model_size != model_size:
                     self.unload_model()
@@ -161,6 +150,7 @@ class MLXTTSBackend:
                 self._load_model_sync(model_size, is_cached)
 
         await asyncio.to_thread(_locked_load)
+        # touch() is a no-op when timeout <= 0 (serverless mode) — cheap call, intentional.
         self._idle_timer.touch()
 
     # Alias for compatibility
@@ -183,7 +173,7 @@ class MLXTTSBackend:
             progress_callback = create_hf_progress_callback(model_name, progress_manager)
             tracker = HFProgressTracker(progress_callback, filter_non_downloads=is_cached)
             
-            logger.info(f"Loading MLX TTS model {model_size}...")
+            logger.info(f"Loading MLX TTS model {model_size}...", extra={"subtype": ["engine", "tts"]})
 
             if not is_cached:
                 # Start tracking download task
@@ -226,10 +216,10 @@ class MLXTTSBackend:
             self._current_model_size = model_size
             self.model_size = model_size
 
-            logger.info(f"MLX TTS model {model_size} loaded successfully")
+            logger.info(f"MLX TTS model {model_size} loaded successfully", extra={"subtype": ["engine", "tts"]})
 
         except ImportError as e:
-            logger.error(f"Error: mlx_audio package not found. Install with: pip install mlx-audio")
+            logger.error(f"Error: mlx_audio package not found. Install with: pip install mlx-audio", extra={"subtype": ["engine", "tts"]})
             self.model = None
             self._current_model_size = None
             progress_manager = get_progress_manager()
@@ -239,7 +229,7 @@ class MLXTTSBackend:
             task_manager.error_download(model_name, str(e))
             raise
         except Exception as e:
-            logger.error(f"Error loading MLX TTS model: {e}")
+            logger.error(f"Error loading MLX TTS model: {e}", extra={"subtype": ["engine", "tts"]})
             self.model = None
             self._current_model_size = None
             progress_manager = get_progress_manager()
@@ -253,10 +243,11 @@ class MLXTTSBackend:
         """Unload the model to free memory."""
         self._idle_timer.cancel()
         if self.model is not None:
+            size = self._current_model_size or "unknown"
             del self.model
             self.model = None
             self._current_model_size = None
-            logger.info("MLX TTS model unloaded")
+            logger.info(f"MLX TTS model unloaded ({size})", extra={"subtype": ["engine", "tts"]})
 
     async def create_voice_prompt(
         self,
@@ -606,7 +597,7 @@ class MLXSTTBackend:
             progress_callback = create_hf_progress_callback(progress_model_name, progress_manager)
             tracker = HFProgressTracker(progress_callback, filter_non_downloads=is_cached)
 
-            logger.info(f"Loading MLX Whisper model {model_size}...")
+            logger.info(f"Loading MLX Whisper model {model_size}...", extra={"subtype": "engine"})
 
             # Only track download progress if model is NOT cached
             if not is_cached:
@@ -654,10 +645,10 @@ class MLXSTTBackend:
             self._current_model_size = model_size
             self.model_size = model_size
 
-            logger.info(f"MLX Whisper model {model_size} loaded successfully")
+            logger.info(f"MLX Whisper model {model_size} loaded successfully", extra={"subtype": "engine"})
 
         except ImportError as e:
-            logger.error(f"Error: mlx_audio package not found. Install with: pip install mlx-audio")
+            logger.error(f"Error: mlx_audio package not found. Install with: pip install mlx-audio", extra={"subtype": "engine"})
             self.model = None
             self._current_model_size = None
             progress_manager = get_progress_manager()
@@ -667,7 +658,7 @@ class MLXSTTBackend:
             task_manager.error_download(progress_model_name, str(e))
             raise
         except Exception as e:
-            logger.error(f"Error loading MLX Whisper model: {e}")
+            logger.error(f"Error loading MLX Whisper model: {e}", extra={"subtype": "engine"})
             self.model = None
             self._current_model_size = None
             progress_manager = get_progress_manager()
@@ -681,10 +672,11 @@ class MLXSTTBackend:
         """Unload the model to free memory."""
         self._idle_timer.cancel()
         if self.model is not None:
+            size = self._current_model_size or "unknown"
             del self.model
             self.model = None
             self._current_model_size = None
-            logger.info("MLX Whisper model unloaded")
+            logger.info(f"MLX Whisper model unloaded ({size})", extra={"subtype": "engine"})
 
     async def transcribe(
         self,

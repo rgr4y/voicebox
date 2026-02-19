@@ -43,27 +43,35 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM base AS deps
 
 ARG CUDA
+ARG DEV_VENV=0
 WORKDIR /app
 
-# Create virtual environment outside /app to survive volume mount
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# If DEV_VENV=1 (build arg), skip building /opt/venv entirely — the host venv at
+# /app/backend/venv will be used instead (volume-mounted at runtime via docker-entrypoint.sh).
+# If DEV_VENV=0 (default), build the full /opt/venv for production use.
+COPY backend/requirements-linux.txt ./requirements-linux.txt
 
-COPY backend/requirements.txt ./requirements.txt
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip && \
-    if [ "$CUDA" = "1" ]; then \
-        pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu124 && \
-        pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124; \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    if [ "$DEV_VENV" = "0" ]; then \
+        python3 -m venv /opt/venv && \
+        /opt/venv/bin/pip install --upgrade pip && \
+        if [ "$CUDA" = "1" ]; then \
+            /opt/venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 && \
+            /opt/venv/bin/pip install -r requirements-linux.txt --extra-index-url https://download.pytorch.org/whl/cu124; \
+        else \
+            /opt/venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+            /opt/venv/bin/pip install -r requirements-linux.txt --extra-index-url https://download.pytorch.org/whl/cpu; \
+        fi; \
     else \
-        pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu && \
-        pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu; \
+        echo "DEV_VENV=1: skipping /opt/venv build, host venv will be used at runtime"; \
     fi
+
+# Copy entrypoint script (selects /opt/venv or host venv based on DEV_VENV env var)
+COPY backend/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
 # Source is volume-mounted at runtime (local dev) or COPYed below (serverless)
 ENV HF_HOME=/app/data/huggingface
-ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy source into image for non-volume-mount deployments (e.g. RunPod)
 COPY backend/ /app/backend/
@@ -73,14 +81,14 @@ FROM deps AS final-0
 EXPOSE 17493
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:17493/health || exit 1
-ENTRYPOINT ["/opt/venv/bin/python3", "-m", "backend.main"]
+ENTRYPOINT ["/docker-entrypoint.sh", "python3", "-m", "backend.main"]
 CMD ["--host", "0.0.0.0", "--port", "17493", "--data-dir", "/app/data"]
 
 # --- Serverless mode: RunPod handler ---
 FROM deps AS final-1
 ENV SERVERLESS=1
 HEALTHCHECK NONE
-ENTRYPOINT ["/opt/venv/bin/python3", "-u", "-m", "backend.serverless_handler"]
+ENTRYPOINT ["/docker-entrypoint.sh", "python3", "-u", "-m", "backend.serverless_handler"]
 CMD []
 
 # --- Pick final stage based on SERVERLESS arg ---

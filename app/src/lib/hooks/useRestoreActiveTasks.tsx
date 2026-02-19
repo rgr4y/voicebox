@@ -18,8 +18,8 @@ export function useRestoreActiveTasks() {
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
   const setActiveGenerationId = useGenerationStore((state) => state.setActiveGenerationId);
   
-  // Track which downloads we've seen to detect new ones
-  const seenDownloadsRef = useRef<Set<string>>(new Set());
+  // Track current download names to avoid spurious re-renders on every poll
+  const activeDownloadNamesRef = useRef<string>('');
 
   const fetchActiveTasks = useCallback(async () => {
     try {
@@ -38,23 +38,13 @@ export function useRestoreActiveTasks() {
         }
       }
 
-      // Update active downloads
-      // Keep track of all active downloads (including new ones)
-      const currentDownloadNames = new Set(tasks.downloads.map((d) => d.model_name));
-      
-      // Remove completed downloads from our seen set
-      for (const name of seenDownloadsRef.current) {
-        if (!currentDownloadNames.has(name)) {
-          seenDownloadsRef.current.delete(name);
-        }
+      // Only update state (and cause re-renders) when the set of downloading
+      // model names actually changes — prevents SSE from reconnecting every 2s.
+      const newKey = tasks.downloads.map((d) => d.model_name).sort().join(',');
+      if (newKey !== activeDownloadNamesRef.current) {
+        activeDownloadNamesRef.current = newKey;
+        setActiveDownloads(tasks.downloads);
       }
-      
-      // Add new downloads to seen set
-      for (const download of tasks.downloads) {
-        seenDownloadsRef.current.add(download.model_name);
-      }
-
-      setActiveDownloads(tasks.downloads);
     } catch (error) {
       // Silently fail - server might be temporarily unavailable
       console.debug('Failed to fetch active tasks:', error);
@@ -75,13 +65,13 @@ export function useRestoreActiveTasks() {
 }
 
 /**
- * Map model names to display names for download toasts.
+ * Resolve a model_name to its display name using the /models/status cache.
+ * Falls back to the raw model_name if not found.
  */
-export const MODEL_DISPLAY_NAMES: Record<string, string> = {
-  'qwen-tts-1.7B': 'Qwen TTS 1.7B',
-  'qwen-tts-0.6B': 'Qwen TTS 0.6B',
-  'whisper-base': 'Whisper Base',
-  'whisper-small': 'Whisper Small',
-  'whisper-medium': 'Whisper Medium',
-  'whisper-large': 'Whisper Large',
-};
+export function getModelDisplayName(
+  modelName: string,
+  models: Array<{ model_name: string; display_name: string }> | undefined,
+): string {
+  const match = models?.find((m) => m.model_name === modelName);
+  return match?.display_name ?? modelName;
+}

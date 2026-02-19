@@ -44,6 +44,7 @@ export interface PlatformAudio {
   startSystemAudioCapture(maxDurationSecs: number): Promise<void>;
   stopSystemAudioCapture(): Promise<Blob>;
   listOutputDevices(): Promise<AudioDevice[]>;
+  listInputDevices(): Promise<AudioDevice[]>;
   playToDevices(audioData: Uint8Array, deviceIds: string[]): Promise<void>;
   stopPlayback(): void;
 }
@@ -51,13 +52,19 @@ export interface PlatformAudio {
 export interface PlatformLifecycle {
   startServer(remote?: boolean): Promise<string>;
   stopServer(): Promise<void>;
+  restartServer(): Promise<string>;
   setKeepServerRunning(keep: boolean): Promise<void>;
   setupWindowCloseHandler(): Promise<void>;
+  openConsoleLogs(): Promise<void>;
+  /** Subscribe to server log lines emitted from the sidecar. Returns unsubscribe fn. */
+  onServerLog(callback: (line: string) => void): Promise<() => void>;
   onServerReady?: () => void;
 }
 
 export interface PlatformMetadata {
   getVersion(): Promise<string>;
+  /** Short git hash + commit count injected at build time, e.g. "abc1234 #264" */
+  getBuildInfo(): string;
   isTauri: boolean;
 }
 

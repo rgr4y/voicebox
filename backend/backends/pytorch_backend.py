@@ -13,6 +13,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from . import TTSBackend, STTBackend
+from .. import model_registry
 from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
 from ..utils.audio import normalize_audio, load_audio
 from ..utils.progress import get_progress_manager
@@ -30,11 +31,12 @@ _STT_IDLE_TIMEOUT = 0 if _SERVERLESS else 300   # 5 minutes (normal)
 class PyTorchTTSBackend:
     """PyTorch-based TTS backend using Qwen3-TTS."""
     
-    def __init__(self, model_size: str = "1.7B"):
+    def __init__(self, model_size: str = model_registry.DEFAULT_MODEL_SIZE):
         self.model = None
         self.model_size = model_size
         self.device = self._get_device()
         self._current_model_size = None
+        self._load_lock = asyncio.Lock()
         self._idle_timer = IdleTimer(
             timeout=_TTS_IDLE_TIMEOUT,
             on_timeout=self.unload_model,
@@ -57,22 +59,16 @@ class PyTorchTTSBackend:
     def _get_model_path(self, model_size: str) -> str:
         """
         Get the HuggingFace Hub model ID.
-        
+
         Args:
-            model_size: Model size (1.7B or 0.6B)
-            
+            model_size: Model size (e.g. 1.7B or 0.6B)
+
         Returns:
             HuggingFace Hub model ID
         """
-        hf_model_map = {
-            "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            "0.6B": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-        }
-        
-        if model_size not in hf_model_map:
+        if not model_registry.is_valid_size(model_size):
             raise ValueError(f"Unknown model size: {model_size}")
-        
-        return hf_model_map[model_size]
+        return model_registry.get_hf_repo(model_size, "pytorch")
     
     def _is_model_cached(self, model_size: str) -> bool:
         """
@@ -117,28 +113,29 @@ class PyTorchTTSBackend:
     async def load_model_async(self, model_size: Optional[str] = None):
         """
         Lazy load the TTS model with automatic downloading from HuggingFace Hub.
-        
+
         Args:
             model_size: Model size to load (1.7B or 0.6B)
         """
         if model_size is None:
             model_size = self.model_size
-            
-        # If already loaded with correct size, return
-        if self.model is not None and self._current_model_size == model_size:
+
+        async with self._load_lock:
+            # If already loaded with correct size, return
+            if self.model is not None and self._current_model_size == model_size:
+                self._idle_timer.touch()
+                return
+
+            # Unload existing model if different size requested
+            if self.model is not None and self._current_model_size != model_size:
+                self.unload_model()
+
+            # Check cache before entering thread pool
+            is_cached = self._is_model_cached(model_size)
+
+            # Run blocking load in thread pool
+            await asyncio.to_thread(self._load_model_sync, model_size, is_cached)
             self._idle_timer.touch()
-            return
-
-        # Unload existing model if different size requested
-        if self.model is not None and self._current_model_size != model_size:
-            self.unload_model()
-
-        # Check cache before entering thread pool
-        is_cached = self._is_model_cached(model_size)
-
-        # Run blocking load in thread pool
-        await asyncio.to_thread(self._load_model_sync, model_size, is_cached)
-        self._idle_timer.touch()
 
     # Alias for compatibility
     load_model = load_model_async
@@ -184,15 +181,18 @@ class PyTorchTTSBackend:
                     status="loading",
                 )
 
-            # Patch tqdm and use HF offline mode for cached models to skip remote validation
-            with tracker.patch_download(), hf_offline_for_cached(is_cached):
+            # Patch tqdm; pass local_files_only when cached to skip remote validation
+            with tracker.patch_download():
                 from qwen_tts import Qwen3TTSModel
 
-                self.model = Qwen3TTSModel.from_pretrained(
-                    model_path,
+                dtype = torch.float32 if self.device == "cpu" else torch.bfloat16
+                load_kwargs = dict(
                     device_map=self.device,
-                    torch_dtype=torch.float32 if self.device == "cpu" else torch.bfloat16,
+                    torch_dtype=dtype,
                 )
+                if is_cached:
+                    load_kwargs["local_files_only"] = True
+                self.model = Qwen3TTSModel.from_pretrained(model_path, **load_kwargs)
 
             if not is_cached:
                 progress_manager.mark_complete(model_name)
@@ -214,7 +214,7 @@ class PyTorchTTSBackend:
             task_manager.error_download(model_name, str(e))
             raise
         except Exception as e:
-            logger.error(f"Error loading TTS model: {e}")
+            logger.error(f"Error loading TTS model: {e}", exc_info=True)
             logger.info(f"Tip: The model will be automatically downloaded from HuggingFace Hub on first use.")
             progress_manager = get_progress_manager()
             task_manager = get_task_manager()
@@ -257,7 +257,7 @@ class PyTorchTTSBackend:
         
         # Check cache if enabled
         if use_cache:
-            cache_key = get_cache_key(audio_path, reference_text)
+            cache_key = get_cache_key(audio_path, reference_text, self._current_model_size)
             cached_prompt = get_cached_voice_prompt(cache_key)
             if cached_prompt is not None:
                 # Cache stores as torch.Tensor but actual prompt is dict
@@ -270,7 +270,7 @@ class PyTorchTTSBackend:
                     # Legacy cache format - convert to dict
                     # This shouldn't happen in practice, but handle it
                     return {"prompt": cached_prompt}, True
-        
+
         def _create_prompt_sync():
             """Run synchronous voice prompt creation in thread pool."""
             return self.model.create_voice_clone_prompt(
@@ -278,13 +278,13 @@ class PyTorchTTSBackend:
                 ref_text=reference_text,
                 x_vector_only_mode=False,
             )
-        
+
         # Run blocking operation in thread pool
         voice_prompt_items = await asyncio.to_thread(_create_prompt_sync)
-        
+
         # Cache if enabled
         if use_cache:
-            cache_key = get_cache_key(audio_path, reference_text)
+            cache_key = get_cache_key(audio_path, reference_text, self._current_model_size)
             cache_voice_prompt(cache_key, voice_prompt_items)
         
         return voice_prompt_items, False
@@ -346,6 +346,11 @@ class PyTorchTTSBackend:
         # Load model
         await self.load_model_async(None)
 
+        # Capture model reference before entering the thread — load_model_async is
+        # serialised by _MLX_LOAD_LOCK equivalent so concurrent swaps can't happen
+        # mid-generation, but capturing here makes the intent explicit.
+        _model = self.model
+
         def _generate_sync():
             """Run synchronous generation in thread pool."""
             if progress_callback:
@@ -358,7 +363,7 @@ class PyTorchTTSBackend:
                     torch.cuda.manual_seed(seed)
 
             # Generate audio - this is the blocking operation
-            wavs, sample_rate = self.model.generate_voice_clone(
+            wavs, sample_rate = _model.generate_voice_clone(
                 text=text,
                 voice_clone_prompt=voice_prompt,
                 instruct=instruct,
@@ -378,7 +383,7 @@ class PyTorchTTSBackend:
 class PyTorchSTTBackend:
     """PyTorch-based STT backend using Whisper."""
     
-    def __init__(self, model_size: str = "base"):
+    def __init__(self, model_size: str = "turbo"):
         self.model = None
         self.processor = None
         self.model_size = model_size
@@ -468,6 +473,15 @@ class PyTorchSTTBackend:
 
     def _load_model_sync(self, model_size: str, is_cached: bool = False):
         """Synchronous model loading."""
+        # Unload any previously loaded model before loading a new size
+        if self.model is not None:
+            del self.model
+            del self.processor
+            self.model = None
+            self.processor = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         try:
             progress_manager = get_progress_manager()
             task_manager = get_task_manager()
@@ -479,7 +493,10 @@ class PyTorchSTTBackend:
             progress_callback = create_hf_progress_callback(progress_model_name, progress_manager)
             tracker = HFProgressTracker(progress_callback, filter_non_downloads=is_cached)
 
-            model_name = f"openai/whisper-{model_size}"
+            model_size_to_hf = {
+                "turbo": "openai/whisper-large-v3-turbo",
+            }
+            model_name = model_size_to_hf.get(model_size, f"openai/whisper-{model_size}")
 
             logger.info(f"Loading Whisper model {model_size} on {self.device}...")
 
@@ -567,21 +584,20 @@ class PyTorchSTTBackend:
             )
             inputs = inputs.to(self.device)
             
-            # Set language if provided
-            forced_decoder_ids = None
+            # Generate transcription
+            # If language is provided, force it; otherwise let Whisper auto-detect
+            generate_kwargs = {}
             if language:
-                # Support all languages from frontend: en, zh, ja, ko, de, fr, ru, pt, es, it
-                # Whisper supports these and many more
                 forced_decoder_ids = self.processor.get_decoder_prompt_ids(
                     language=language,
                     task="transcribe",
                 )
-            
-            # Generate transcription
+                generate_kwargs["forced_decoder_ids"] = forced_decoder_ids
+
             with torch.no_grad():
                 predicted_ids = self.model.generate(
                     inputs["input_features"],
-                    forced_decoder_ids=forced_decoder_ids,
+                    **generate_kwargs,
                 )
             
             # Decode

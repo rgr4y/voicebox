@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, CheckCircle2, Edit, Plus, Speaker, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { Check, CheckCircle2, Edit, Mic, Plus, RefreshCw, Speaker, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -20,11 +20,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
 import { BOTTOM_SAFE_AREA_PADDING } from '@/lib/constants/ui';
 import { cn } from '@/lib/utils/cn';
-import { usePlayerStore } from '@/stores/playerStore';
 import { usePlatform } from '@/platform/PlatformContext';
+import { usePlayerStore } from '@/stores/playerStore';
 
 interface AudioDevice {
   id: string;
@@ -37,16 +38,23 @@ export function AudioTab() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [editingChannel, setEditingChannel] = useState<string | null>(null);
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const queryClient = useQueryClient();
   const audioUrl = usePlayerStore((state) => state.audioUrl);
   const isPlayerVisible = !!audioUrl;
+  const { toast } = useToast();
+  const prevDefaultInputRef = useRef<string | null>(null);
 
   const { data: channels, isLoading: channelsLoading } = useQuery({
     queryKey: ['channels'],
     queryFn: () => apiClient.listChannels(),
   });
 
-  const { data: devices, isLoading: devicesLoading } = useQuery({
+  const {
+    data: devices,
+    isLoading: devicesLoading,
+    refetch: refetchDevices,
+  } = useQuery({
     queryKey: ['audio-devices'],
     queryFn: async () => {
       if (!platform.metadata.isTauri) {
@@ -60,7 +68,44 @@ export function AudioTab() {
       }
     },
     enabled: platform.metadata.isTauri,
+    refetchOnWindowFocus: true,
+    staleTime: 5000,
   });
+
+  const { data: inputDevices } = useQuery({
+    queryKey: ['audio-input-devices'],
+    queryFn: async () => {
+      if (!platform.metadata.isTauri) return [];
+      try {
+        return await platform.audio.listInputDevices();
+      } catch (error) {
+        console.error('Failed to list input devices:', error);
+        return [];
+      }
+    },
+    enabled: platform.metadata.isTauri,
+    refetchOnWindowFocus: true,
+    // Poll every 3 seconds so default input changes are noticed automatically
+    refetchInterval: 3000,
+    staleTime: 3000,
+  });
+
+  const defaultInputDevice = inputDevices?.find((d) => d.is_default);
+
+  // Toast when default input device changes.
+  // prevDefaultInputRef starts null — the null check prevents a toast on first render/mount.
+  useEffect(() => {
+    if (!defaultInputDevice) return;
+    const prev = prevDefaultInputRef.current;
+    if (prev !== null && prev !== defaultInputDevice.name) {
+      toast({
+        title: 'Default input changed',
+        description: defaultInputDevice.name,
+        duration: 3000,
+      });
+    }
+    prevDefaultInputRef.current = defaultInputDevice.name;
+  }, [defaultInputDevice, toast]);
 
   const { data: profiles } = useQuery({
     queryKey: ['profiles'],
@@ -83,6 +128,25 @@ export function AudioTab() {
       channelId: string;
       data: { name?: string; device_ids?: string[] };
     }) => apiClient.updateChannel(channelId, data),
+    onMutate: async ({ channelId, data }) => {
+      // Optimistically update channels cache so checkmarks appear immediately
+      await queryClient.cancelQueries({ queryKey: ['channels'] });
+      const previous = queryClient.getQueryData(['channels']);
+      if (data.device_ids !== undefined) {
+        queryClient.setQueryData(
+          ['channels'],
+          (old: Array<{ id: string; device_ids: string[]; [key: string]: unknown }> | undefined) =>
+            old?.map((ch) => (ch.id === channelId ? { ...ch, device_ids: data.device_ids! } : ch)),
+        );
+      }
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      // Roll back on error
+      if (context?.previous) {
+        queryClient.setQueryData(['channels'], context.previous);
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
       queryClient.invalidateQueries({ queryKey: ['profile-channels'] });
@@ -110,8 +174,20 @@ export function AudioTab() {
   const setChannelVoices = useMutation({
     mutationFn: ({ channelId, profileIds }: { channelId: string; profileIds: string[] }) =>
       apiClient.setChannelVoices(channelId, profileIds),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['channel-voices'] });
+    onMutate: async ({ channelId, profileIds }) => {
+      // Optimistically update channel-voices cache so the list updates immediately
+      await queryClient.cancelQueries({ queryKey: ['channel-voices', channelId] });
+      const previous = queryClient.getQueryData(['channel-voices', channelId]);
+      queryClient.setQueryData(['channel-voices', channelId], { profile_ids: profileIds });
+      return { previous, channelId };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous !== undefined) {
+        queryClient.setQueryData(['channel-voices', context.channelId], context.previous);
+      }
+    },
+    onSuccess: (_data, { channelId }) => {
+      queryClient.invalidateQueries({ queryKey: ['channel-voices', channelId] });
       queryClient.invalidateQueries({ queryKey: ['profile-channels'] });
     },
   });
@@ -132,13 +208,17 @@ export function AudioTab() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex items-center justify-between mb-6 shrink-0">
+      <div className="flex items-center justify-between mb-2 shrink-0">
         <h2 className="text-2xl font-bold">Audio Channels</h2>
         <Button onClick={() => setCreateDialogOpen(true)}>
           <Plus className="h-4 w-4 mr-2" />
           New Channel
         </Button>
       </div>
+      <p className="text-sm text-muted-foreground mb-6 shrink-0">
+        Route different voices to dedicated speakers — ideal for story mode, museum displays, or
+        events where each character plays through a separate device.
+      </p>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full min-h-0">
         {/* Left Column - Channels */}
@@ -268,7 +348,32 @@ export function AudioTab() {
           )}
         >
           <div className="shrink-0 mb-4">
-            <h3 className="text-lg font-semibold">Available Devices</h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Available Devices</h3>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={async () => {
+                  setIsRefreshing(true);
+                  try {
+                    await refetchDevices();
+                    toast({ title: 'Devices refreshed', duration: 2000 });
+                  } catch {
+                    toast({
+                      title: 'Failed to refresh devices',
+                      variant: 'destructive',
+                      duration: 3000,
+                    });
+                  } finally {
+                    setIsRefreshing(false);
+                  }
+                }}
+                title="Refresh output devices"
+              >
+                <RefreshCw className={cn('h-4 w-4', isRefreshing && 'animate-spin')} />
+              </Button>
+            </div>
             <p className="text-sm text-muted-foreground mt-1">
               {selectedChannelId
                 ? selectedChannel?.is_default
@@ -276,6 +381,15 @@ export function AudioTab() {
                   : 'Click devices to add or remove them from the selected channel'
                 : 'Select a channel to assign devices'}
             </p>
+            {defaultInputDevice && (
+              <div className="flex items-center gap-1.5 mt-2 text-xs text-muted-foreground">
+                <Mic className="h-3 w-3 shrink-0" />
+                <span>
+                  Default input:{' '}
+                  <span className="font-medium text-foreground">{defaultInputDevice.name}</span>
+                </span>
+              </div>
+            )}
           </div>
           {allDevices.length > 0 ? (
             <div className="space-y-2">
@@ -341,7 +455,9 @@ export function AudioTab() {
             <div className="flex flex-col items-center justify-center py-12 border-2 border-dashed border-muted rounded-md">
               <CheckCircle2 className="h-12 w-12 text-muted-foreground mb-4" />
               <p className="text-muted-foreground text-center">
-                {platform.metadata.isTauri ? 'No audio devices found' : 'Audio device selection requires Tauri'}
+                {platform.metadata.isTauri
+                  ? 'No audio devices found'
+                  : 'Audio device selection requires Tauri'}
               </p>
             </div>
           )}

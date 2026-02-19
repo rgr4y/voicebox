@@ -374,7 +374,7 @@ export class DefaultService {
    * @throws ApiError
    */
   public static loadModelModelsLoadPost({
-    modelSize = '1.7B',
+    modelSize,
   }: {
     modelSize?: string;
   }): CancelablePromise<any> {

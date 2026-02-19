@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -22,8 +21,19 @@ import tempfile
 import io
 from pathlib import Path
 import uuid
-import signal
 import os
+
+# Set HSA_OVERRIDE_GFX_VERSION for AMD GPUs that aren't officially listed in ROCm
+# (e.g., RX 580 is gfx803, RX 6600 is gfx1032 which maps to gfx1030 target)
+# This must be set BEFORE any torch.cuda calls
+if not os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
+    os.environ["HSA_OVERRIDE_GFX_VERSION"] = "10.3.0"
+
+# Suppress noisy MIOpen workspace warnings on AMD GPUs
+if not os.environ.get("MIOPEN_LOG_LEVEL"):
+    os.environ["MIOPEN_LOG_LEVEL"] = "4"
+
+import signal
 
 from . import database, models, profiles, history, tts, transcribe, config, export_import, channels, stories, __version__
 from .database import get_db, Generation as DBGeneration, GenerationJob as DBGenerationJob, VoiceProfile as DBVoiceProfile
@@ -31,6 +41,7 @@ from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
 from .platform_detect import get_backend_type
+from . import model_registry
 
 logger = logging.getLogger(__name__)
 
@@ -164,9 +175,8 @@ async def auth_me_stub():
 @app.get("/health", response_model=models.HealthResponse)
 async def health():
     """Health check endpoint."""
-    from huggingface_hub import hf_hub_download, constants as hf_constants
+    from huggingface_hub import constants as hf_constants
     from pathlib import Path
-    import os
 
     tts_model = tts.get_tts_model()
     backend_type = get_backend_type()
@@ -213,13 +223,9 @@ async def health():
     # Check if default model is downloaded (cached)
     model_downloaded = None
     try:
-        # Check if the default model (1.7B) is cached
-        # Use different model IDs based on backend
-        if backend_type == "mlx":
-            from .backends.mlx_backend import MLXTTSBackend as _MLXTTSBackend
-            default_model_id = _MLXTTSBackend()._get_model_path("1.7B")
-        else:
-            default_model_id = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+        # Check if the default model is cached
+        _bk = "mlx" if backend_type == "mlx" else "pytorch"
+        default_model_id = model_registry.get_hf_repo(model_registry.DEFAULT_MODEL_SIZE, _bk)
         
         # Method 1: Try scan_cache_dir if available
         try:
@@ -664,7 +670,7 @@ async def generate_speech(
             text=data.text,
             language=data.language,
             seed=data.seed,
-            model_size=data.model_size or "1.7B",
+            model_size=data.model_size or model_registry.DEFAULT_MODEL_SIZE,
             instruct=data.instruct,
             request_user_id=data.request_user_id,
             request_user_first_name=data.request_user_first_name,
@@ -719,16 +725,30 @@ async def generate_speech(
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found")
 
-        voice_prompt = await profiles.create_voice_prompt_for_profile(
-            data.profile_id, db,
-        )
+        # Don't silently download — require the model to be cached first.
+        # Check before acquiring the lock so we fail fast without blocking.
+        model_size = data.model_size or model_registry.DEFAULT_MODEL_SIZE
+        _tts_model_check = tts.get_tts_model()
+        if not _tts_model_check._is_model_cached(model_size):
+            model_name = f"qwen-tts-{model_size}"
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name} is not downloaded. Please download it first from the Models page.",
+            )
 
         generation_started_at = datetime.utcnow()
         async with _model_lock:
             tts_model = tts.get_tts_model()
-            model_size = data.model_size or "1.7B"
+            model_size = data.model_size or model_registry.DEFAULT_MODEL_SIZE
+
+            # Load the target model BEFORE creating the voice prompt so
+            # the prompt tensors match the model's hidden dimensions.
             await tts_model.load_model_async(model_size)
             save_model_prefs(tts_size=model_size)
+
+            voice_prompt = await profiles.create_voice_prompt_for_profile(
+                data.profile_id, db,
+            )
             audio, sample_rate = await tts_model.generate(
                 data.text, voice_prompt, data.language, data.seed, data.instruct,
             )
@@ -1199,7 +1219,7 @@ async def transcribe_audio(
                 }
             )
 
-        logger.debug(f"[Transcribe] Starting transcription...")
+        logger.debug("[Transcribe] Starting transcription...")
         text = await whisper_model.transcribe(tmp_path, language)
         save_model_prefs(stt_size=model_size)
         logger.debug(f"[Transcribe] Transcription complete: {text[:100] if text else '(empty)'}...")
@@ -1469,7 +1489,7 @@ async def get_sample_audio(sample_id: str, db: Session = Depends(get_db)):
 # ============================================
 
 @app.post("/models/load")
-async def load_model(model_size: str = "1.7B"):
+async def load_model(model_size: str = model_registry.DEFAULT_MODEL_SIZE):
     """Manually load TTS model."""
     try:
         tts_model = tts.get_tts_model()
@@ -1494,14 +1514,14 @@ async def unload_model():
 async def get_model_progress(model_name: str):
     """Get model download progress via Server-Sent Events."""
     from fastapi.responses import StreamingResponse
-    
+
     progress_manager = get_progress_manager()
-    
+
     async def event_generator():
         """Generate SSE events for progress updates."""
         async for event in progress_manager.subscribe(model_name):
             yield event
-    
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -1511,6 +1531,16 @@ async def get_model_progress(model_name: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/models/progress-snapshot/{model_name}")
+async def get_model_progress_snapshot(model_name: str):
+    """Get current model download progress as a single JSON snapshot (for polling)."""
+    progress_manager = get_progress_manager()
+    progress = progress_manager.get_progress(model_name)
+    if progress is None:
+        return {"model_name": model_name, "status": "idle", "current": 0, "total": 0, "progress": 0, "filename": None}
+    return progress
 
 
 @app.get("/models/status", response_model=models.ModelStatusListResponse)
@@ -1548,13 +1578,24 @@ async def get_model_status():
         except Exception:
             return False
     
-    # Use backend-specific model IDs
+    # Build TTS model configs from the registry
+    _backend_key = "mlx" if backend_type == "mlx" else "pytorch"
+    model_configs = []
+    for size in model_registry.get_tts_sizes():
+        _sz = size  # capture for lambda
+        model_configs.append({
+            "model_name": model_registry.get_model_name(size),
+            "display_name": model_registry.get_display_name(size),
+            "description": model_registry.get_description(size),
+            "hf_repo_id": model_registry.get_hf_repo(size, _backend_key),
+            "model_size": size,
+            "model_type": "tts",
+            "check_loaded": lambda s=_sz: check_tts_loaded(s),
+        })
+
+    # Whisper model configs — backend-specific repo IDs
     if backend_type == "mlx":
-        from .backends.mlx_backend import MLXTTSBackend, MLXSTTBackend
-        _mlx_tts = MLXTTSBackend()
-        tts_1_7b_id = _mlx_tts._get_model_path("1.7B")
-        tts_0_6b_id = _mlx_tts._get_model_path("0.6B")
-        # MLX backend uses mlx-community Whisper models
+        from .backends.mlx_backend import MLXSTTBackend
         mlx_whisper_map = MLXSTTBackend.get_mlx_whisper_model_map()
         whisper_base_id = mlx_whisper_map["base"]
         whisper_small_id = mlx_whisper_map["small"]
@@ -1562,34 +1603,19 @@ async def get_model_status():
         whisper_large_id = mlx_whisper_map["large"]
         whisper_large_v3_turbo_id = mlx_whisper_map["large-v3-turbo"]
     else:
-        tts_1_7b_id = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-        tts_0_6b_id = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
         whisper_base_id = "openai/whisper-base"
         whisper_small_id = "openai/whisper-small"
         whisper_medium_id = "openai/whisper-medium"
         whisper_large_id = "openai/whisper-large"
         whisper_large_v3_turbo_id = "openai/whisper-large-v3-turbo"
-    
-    model_configs = [
-        {
-            "model_name": "qwen-tts-1.7B",
-            "display_name": "Qwen TTS 1.7B",
-            "hf_repo_id": tts_1_7b_id,
-            "model_size": "1.7B",
-            "check_loaded": lambda: check_tts_loaded("1.7B"),
-        },
-        {
-            "model_name": "qwen-tts-0.6B",
-            "display_name": "Qwen TTS 0.6B",
-            "hf_repo_id": tts_0_6b_id,
-            "model_size": "0.6B",
-            "check_loaded": lambda: check_tts_loaded("0.6B"),
-        },
+
+    model_configs += [
         {
             "model_name": "whisper-base",
             "display_name": "Whisper Base",
             "hf_repo_id": whisper_base_id,
             "model_size": "base",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("base"),
         },
         {
@@ -1597,6 +1623,7 @@ async def get_model_status():
             "display_name": "Whisper Small",
             "hf_repo_id": whisper_small_id,
             "model_size": "small",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("small"),
         },
         {
@@ -1604,6 +1631,7 @@ async def get_model_status():
             "display_name": "Whisper Medium",
             "hf_repo_id": whisper_medium_id,
             "model_size": "medium",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("medium"),
         },
         {
@@ -1611,6 +1639,7 @@ async def get_model_status():
             "display_name": "Whisper Large",
             "hf_repo_id": whisper_large_id,
             "model_size": "large",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("large"),
         },
         {
@@ -1618,6 +1647,7 @@ async def get_model_status():
             "display_name": "Whisper Large V3 Turbo",
             "hf_repo_id": whisper_large_v3_turbo_id,
             "model_size": "large-v3-turbo",
+            "model_type": "stt",
             "check_loaded": lambda: check_whisper_loaded("large-v3-turbo"),
         },
     ]
@@ -1640,7 +1670,7 @@ async def get_model_status():
     
     statuses = []
     
-    for config in model_configs:
+    for model_config in model_configs:
         try:
             downloaded = False
             size_mb = None
@@ -1648,7 +1678,7 @@ async def get_model_status():
             
             # Method 1: Try using scan_cache_dir if available
             if cache_info:
-                repo_id = config["hf_repo_id"]
+                repo_id = model_config["hf_repo_id"]
                 for repo in cache_info.repos:
                     if repo.repo_id == repo_id:
                         # Check if actual model weight files exist (not just config files)
@@ -1688,7 +1718,7 @@ async def get_model_status():
             if not downloaded:
                 try:
                     cache_dir = hf_constants.HF_HUB_CACHE
-                    repo_cache = Path(cache_dir) / ("models--" + config["hf_repo_id"].replace("/", "--"))
+                    repo_cache = Path(cache_dir) / ("models--" + model_config["hf_repo_id"].replace("/", "--"))
                     
                     if repo_cache.exists():
                         # Check for .incomplete files - if any exist, download is still in progress
@@ -1728,13 +1758,13 @@ async def get_model_status():
             
             # Check if loaded in memory
             try:
-                loaded = config["check_loaded"]()
+                loaded = model_config["check_loaded"]()
             except Exception:
                 loaded = False
-            
+
             # Check if this model (or its shared repo) is currently being downloaded
-            is_downloading = config["hf_repo_id"] in active_download_repos
-            
+            is_downloading = model_config["hf_repo_id"] in active_download_repos
+
             # If downloading, don't report as downloaded (partial files exist)
             if is_downloading:
                 downloaded = False
@@ -1743,39 +1773,45 @@ async def get_model_status():
             # If no size from disk, query HuggingFace API
             if size_mb is None and not is_downloading:
                 from .utils.hf_sizes import get_repo_size_mb
-                size_mb = await get_repo_size_mb(config["hf_repo_id"])
+                size_mb = await get_repo_size_mb(model_config["hf_repo_id"])
 
             statuses.append(models.ModelStatus(
-                model_name=config["model_name"],
-                display_name=config["display_name"],
+                model_name=model_config["model_name"],
+                display_name=model_config["display_name"],
                 downloaded=downloaded,
                 downloading=is_downloading,
                 size_mb=size_mb,
                 loaded=loaded,
+                model_type=model_config.get("model_type"),
+                model_size=model_config.get("model_size"),
+                description=model_config.get("description"),
             ))
-        except Exception as e:
+        except Exception:
             # If check fails, try to at least check if loaded
             try:
-                loaded = config["check_loaded"]()
+                loaded = model_config["check_loaded"]()
             except Exception:
                 loaded = False
-            
+
             # Check if this model (or its shared repo) is currently being downloaded
-            is_downloading = config["hf_repo_id"] in active_download_repos
+            is_downloading = model_config["hf_repo_id"] in active_download_repos
 
             # If not downloading, try to get size from HuggingFace API
             size_mb = None
             if not is_downloading:
                 from .utils.hf_sizes import get_repo_size_mb
-                size_mb = await get_repo_size_mb(config["hf_repo_id"])
+                size_mb = await get_repo_size_mb(model_config["hf_repo_id"])
 
             statuses.append(models.ModelStatus(
-                model_name=config["model_name"],
-                display_name=config["display_name"],
+                model_name=model_config["model_name"],
+                display_name=model_config["display_name"],
                 downloaded=False,  # Assume not downloaded if check failed
                 downloading=is_downloading,
                 size_mb=size_mb,
                 loaded=loaded,
+                model_type=model_config.get("model_type"),
+                model_size=model_config.get("model_size"),
+                description=model_config.get("description"),
             ))
     
     return models.ModelStatusListResponse(models=statuses)
@@ -1789,15 +1825,13 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
     task_manager = get_task_manager()
     progress_manager = get_progress_manager()
     
-    model_configs = {
-        "qwen-tts-1.7B": {
-            "model_size": "1.7B",
-            "load_func": lambda: tts.get_tts_model().load_model("1.7B"),
-        },
-        "qwen-tts-0.6B": {
-            "model_size": "0.6B",
-            "load_func": lambda: tts.get_tts_model().load_model("0.6B"),
-        },
+    model_configs = {}
+    for size in model_registry.get_tts_sizes():
+        model_configs[model_registry.get_model_name(size)] = {
+            "model_size": size,
+            "load_func": lambda s=size: tts.get_tts_model().load_model(s),
+        }
+    model_configs.update({
         "whisper-base": {
             "model_size": "base",
             "load_func": lambda: transcribe.get_whisper_model().load_model("base"),
@@ -1818,13 +1852,13 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
             "model_size": "large-v3-turbo",
             "load_func": lambda: transcribe.get_whisper_model().load_model("large-v3-turbo"),
         },
-    }
-    
+    })
+
     if request.model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_name}")
-    
+
     config = model_configs[request.model_name]
-    
+
     async def download_in_background():
         """Download model in background without blocking the HTTP request."""
         try:
@@ -1884,43 +1918,41 @@ async def cancel_model_download(model_name: str):
 async def delete_model(model_name: str):
     """Delete a downloaded model from the HuggingFace cache."""
     import shutil
-    import os
     from huggingface_hub import constants as hf_constants
     
-    # Map model names to HuggingFace repo IDs
-    model_configs = {
-        "qwen-tts-1.7B": {
-            "hf_repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            "model_size": "1.7B",
+    # Map model names to HuggingFace repo IDs — repo differs by backend
+    _backend = get_backend_type()
+    _backend_key = "mlx" if _backend == "mlx" else "pytorch"
+    model_configs = {}
+    for size in model_registry.get_tts_sizes():
+        model_configs[model_registry.get_model_name(size)] = {
+            "hf_repo_id": model_registry.get_hf_repo(size, _backend_key),
+            "model_size": size,
             "model_type": "tts",
-        },
-        "qwen-tts-0.6B": {
-            "hf_repo_id": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            "model_size": "0.6B",
-            "model_type": "tts",
-        },
+        }
+    model_configs.update({
         "whisper-base": {
             "hf_repo_id": "openai/whisper-base",
             "model_size": "base",
-            "model_type": "whisper",
+            "model_type": "stt",
         },
         "whisper-small": {
             "hf_repo_id": "openai/whisper-small",
             "model_size": "small",
-            "model_type": "whisper",
+            "model_type": "stt",
         },
         "whisper-medium": {
             "hf_repo_id": "openai/whisper-medium",
             "model_size": "medium",
-            "model_type": "whisper",
+            "model_type": "stt",
         },
         "whisper-large": {
             "hf_repo_id": "openai/whisper-large",
             "model_size": "large",
-            "model_type": "whisper",
+            "model_type": "stt",
         },
-    }
-    
+    })
+
     if model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
     
@@ -1938,23 +1970,35 @@ async def delete_model(model_name: str):
             if whisper_model.is_loaded() and whisper_model.model_size == config["model_size"]:
                 transcribe.unload_whisper_model()
         
-        # Find and delete the cache directory (using HuggingFace's OS-specific cache location)
+        # Find and delete the cache directory (using HuggingFace's OS-specific cache location).
+        # Also clean up any legacy repo paths (e.g. bf16 Base variants replaced by 4-bit).
         cache_dir = hf_constants.HF_HUB_CACHE
-        repo_cache_dir = Path(cache_dir) / ("models--" + hf_repo_id.replace("/", "--"))
-        
-        # Check if the cache directory exists
-        if not repo_cache_dir.exists():
+        # Collect all known HF repos (both backends) so we clean up
+        # legacy cache dirs when a model is deleted (e.g. bf16 → 4bit switch).
+        legacy_tts_repos = list({
+            model_registry.get_hf_repo(s, b)
+            for s in model_registry.get_tts_sizes()
+            for b in ("pytorch", "mlx")
+        })
+        candidates = [hf_repo_id] + [r for r in legacy_tts_repos if r != hf_repo_id]
+
+        deleted_any = False
+        for repo in candidates:
+            repo_cache_dir = Path(cache_dir) / ("models--" + repo.replace("/", "--"))
+            if repo_cache_dir.exists():
+                try:
+                    shutil.rmtree(repo_cache_dir)
+                    deleted_any = True
+                    logger.info(f"Deleted model cache: {repo_cache_dir}")
+                except OSError as e:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to delete model cache directory: {str(e)}"
+                    )
+
+        if not deleted_any:
             raise HTTPException(status_code=404, detail=f"Model {model_name} not found in cache")
-        
-        # Delete the entire cache directory for this model
-        try:
-            shutil.rmtree(repo_cache_dir)
-        except OSError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to delete model cache directory: {str(e)}"
-            )
-        
+
         return {"message": f"Model {model_name} deleted successfully"}
         
     except HTTPException:
@@ -1969,7 +2013,7 @@ async def clear_cache():
     try:
         deleted_count = clear_voice_prompt_cache()
         return {
-            "message": f"Voice prompt cache cleared successfully",
+            "message": "Voice prompt cache cleared successfully",
             "files_deleted": deleted_count,
         }
     except Exception as e:
@@ -2050,7 +2094,11 @@ def _get_gpu_status() -> str:
     """Get GPU availability status."""
     backend_type = get_backend_type()
     if torch.cuda.is_available():
-        return f"CUDA ({torch.cuda.get_device_name(0)})"
+        device_name = torch.cuda.get_device_name(0)
+        is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+        if is_rocm:
+            return f"ROCm ({device_name})"
+        return f"CUDA ({device_name})"
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         return "MPS (Apple Silicon)"
     elif backend_type == "mlx":
@@ -2099,17 +2147,17 @@ def _cleanup_stale_jobs():
         for job in stale:
             job.status = "timeout"
             job.completed_at = datetime.utcnow()
-            logger.info(f"[TTS] Marked stale job {job.id} as timeout (server restart)")
+            logger.info(f"[Queue] Marked stale job {job.id} as timeout (server restart)")
         if stale:
             db.commit()
-            logger.info(f"[TTS] Cleaned up {len(stale)} stale jobs from previous run")
+            logger.info(f"[Queue] Cleaned up {len(stale)} stale jobs from previous run")
     finally:
         db.close()
 
 
 async def _job_worker():
     """Background worker that processes queued generation jobs one at a time."""
-    logger.info("[TTS] Job worker started")
+    logger.info("[Queue] Job worker started")
     while True:
         try:
             # Wait for signal or poll every 2s
@@ -2138,7 +2186,7 @@ async def _job_worker():
                         get_progress_manager().mark_error(job.id, "Generation timeout")
                     except Exception:
                         pass
-                    logger.warning(f"[TTS] Job {job.id} timed out (stuck >5 min)")
+                    logger.warning(f"[Queue] Job {job.id} timed out (stuck >5 min)")
                 if stuck:
                     db.commit()
 
@@ -2166,7 +2214,7 @@ async def _job_worker():
                 text = job.text
                 language = job.language
                 seed = job.seed
-                model_size = job.model_size or "1.7B"
+                model_size = job.model_size or model_registry.DEFAULT_MODEL_SIZE
                 instruct = job.instruct
                 request_user_id = job.request_user_id
                 request_user_first_name = job.request_user_first_name
@@ -2226,13 +2274,29 @@ async def _job_worker():
                     if not profile:
                         raise ValueError("Profile not found")
 
+                    tts_model = tts.get_tts_model()
+
+                    # Don't silently download — require the model to be cached first
+                    if not tts_model._is_model_cached(model_size):
+                        model_name = f"qwen-tts-{model_size}"
+                        raise ValueError(f"Model {model_name} is not downloaded. Please download it first from the Models page.")
+
+                    # Tell the CLI the model is loading (may involve a download on first run)
+                    progress_manager.update_progress(
+                        model_name=job_id,
+                        current=0,
+                        total=100,
+                        status="loading",
+                    )
+
+                    # Load the target model BEFORE creating the voice prompt so
+                    # the prompt tensors match the model's hidden dimensions.
+                    await tts_model.load_model_async(model_size)
+                    save_model_prefs(tts_size=model_size)
+
                     voice_prompt = await profiles.create_voice_prompt_for_profile(
                         profile_id, gen_db,
                     )
-
-                    tts_model = tts.get_tts_model()
-                    await tts_model.load_model_async(model_size)
-                    save_model_prefs(tts_size=model_size)
 
                     audio, sample_rate = await tts_model.generate(
                         text, voice_prompt, language, seed, instruct,
@@ -2300,26 +2364,23 @@ async def _job_worker():
             _job_signal.set()
 
         except asyncio.CancelledError:
-            logger.info("[TTS] Job worker shutting down")
+            logger.info("[Queue] Job worker shutting down")
             break
         except Exception as e:
-            logger.exception(f"[TTS] Job worker error: {e}")
+            logger.exception(f"[Queue] Job worker error: {e}")
             await asyncio.sleep(2)
 
 
 async def _startup():
     """Run on application startup."""
-    _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        level=getattr(logging, _log_level, logging.INFO),
-    )
-    logger.info("voicebox API starting up...")
+    from .utils.logging_config import configure_json_logging
+    configure_json_logging()
+    logger.info("voicebox API starting up...", extra={"subtype": "api"})
     database.init_db()
-    logger.info(f"Database initialized at {database._db_path}")
+    logger.info(f"Database initialized at {database._db_path.resolve()}")
     backend_type = get_backend_type()
-    logger.info(f"Backend: {backend_type.upper()}")
-    logger.info(f"GPU available: {_get_gpu_status()}")
+    logger.info(f"Backend: {backend_type.upper()}", extra={"subtype": "engine"})
+    logger.info(f"GPU available: {_get_gpu_status()}", extra={"subtype": "engine"})
 
     # Initialize progress manager with main event loop for thread-safe operations
     try:
@@ -2336,13 +2397,13 @@ async def _startup():
         # Check for HF_TOKEN (huggingface_hub reads it automatically)
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
         if hf_token:
-            logger.info(f"HuggingFace token: {'*' * 4}{hf_token[-4:]}")
+            logger.info(f"HuggingFace token: {'*' * 4}{hf_token[-4:]}", extra={"subtype": "huggingface"})
         else:
-            logger.info("HuggingFace token: not set (set HF_TOKEN env var for gated models)")
+            logger.info("HuggingFace token: not set (set HF_TOKEN env var for gated models)", extra={"subtype": "huggingface"})
 
         cache_dir = Path(hf_constants.HF_HUB_CACHE)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"HuggingFace cache directory: {cache_dir}")
+        logger.info(f"HuggingFace cache directory: {cache_dir}", extra={"subtype": "huggingface"})
     except Exception as e:
         logger.warning(f"Could not set up HuggingFace: {e}")
         logger.warning("Model downloads may fail. Please ensure the directory exists and has write permissions.")
@@ -2369,18 +2430,29 @@ async def _startup():
 
 
 async def _preload_models():
-    """Preload TTS and STT models based on saved preferences."""
+    """Preload TTS and STT models based on saved preferences.
+
+    In serverless or web-server mode the model to use is unknown at boot
+    (serverless gets it from the first request; web/Docker gets it from the
+    first queued job).  Preloading is only useful in desktop (Tauri) mode
+    where a single user's last-used preference is meaningful.
+    """
+    _serverless = os.environ.get("SERVERLESS", "") in ("1", "true")
+    _web_server = os.environ.get("WEB_SERVER", "") in ("1", "true")
+    if _serverless or _web_server:
+        logger.info("Skipping model preload (serverless/web-server mode)")
+        return
+
     prefs = _load_model_prefs()
-    tts_size = prefs.get("tts_model_size", "1.7B")
-    stt_size = prefs.get("stt_model_size", "base")
+    tts_size = prefs.get("tts_model_size", model_registry.DEFAULT_MODEL_SIZE)
 
     # Preload TTS model
     try:
         tts_backend = tts.get_tts_model()
         if tts_backend._is_model_cached(tts_size):
-            logger.info(f"Preloading TTS model ({tts_size})...")
+            logger.info(f"Preloading TTS model ({tts_size})...", extra={"subtype": "tts"})
             await tts_backend.load_model_async(tts_size)
-            logger.info(f"TTS model ({tts_size}) preloaded")
+            logger.info(f"TTS model ({tts_size}) preloaded", extra={"subtype": "tts"})
         else:
             logger.info(f"TTS model ({tts_size}) not cached, skipping preload")
     except Exception as e:
@@ -2392,7 +2464,7 @@ async def _preload_models():
 
 async def _shutdown():
     """Run on application shutdown."""
-    logger.info("voicebox API shutting down...")
+    logger.info("voicebox API shutting down...", extra={"subtype": "api"})
     # Unload models to free memory
     tts.unload_tts_model()
     transcribe.unload_whisper_model()
@@ -2422,7 +2494,27 @@ if __name__ == "__main__":
         default=None,
         help="Data directory for database, profiles, and generated audio",
     )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Also write JSON logs to this file",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        default=False,
+        help="Enable auto-reload (development only)",
+    )
     args = parser.parse_args()
+
+    from backend.utils.logging_config import configure_json_logging
+    configure_json_logging()
+
+    # Set up log file if requested
+    if args.log_file:
+        from backend.utils.logging_config import configure_log_file
+        configure_log_file(args.log_file)
 
     # Set data directory if provided
     if args.data_dir:
@@ -2436,6 +2528,12 @@ if __name__ == "__main__":
         "backend.main:app",
         host=args.host,
         port=args.port,
-        reload=False,  # Disable reload in production
+        reload=args.reload,
+        reload_dirs=["backend/backends", "backend/utils", "backend/main.py",
+                     "backend/tts.py", "backend/models.py", "backend/profiles.py",
+                     "backend/stories.py", "backend/studio.py", "backend/transcribe.py",
+                     "backend/database.py", "backend/config.py", "backend/channels.py",
+                     "backend/history.py", "backend/export_import.py"] if args.reload else None,
         log_level=_log_level,
+        log_config=None,  # Don't let uvicorn overwrite our JSON logging config
     )

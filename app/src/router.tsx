@@ -8,8 +8,10 @@ import { Sidebar } from '@/components/Sidebar';
 import { StoriesTab } from '@/components/StoriesTab/StoriesTab';
 import { Toaster } from '@/components/ui/toaster';
 import { VoicesTab } from '@/components/VoicesTab/VoicesTab';
+import { useQuery } from '@tanstack/react-query';
+import { apiClient } from '@/lib/api/client';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
-import { MODEL_DISPLAY_NAMES, useRestoreActiveTasks } from '@/lib/hooks/useRestoreActiveTasks';
+import { getModelDisplayName, useRestoreActiveTasks } from '@/lib/hooks/useRestoreActiveTasks';
 // Simple platform check that works in both web and Tauri
 const isMacOS = () => navigator.platform.toLowerCase().includes('mac');
 
@@ -17,6 +19,11 @@ const isMacOS = () => navigator.platform.toLowerCase().includes('mac');
 function RootLayout() {
   // Monitor active downloads/generations and show toasts for them
   const activeDownloads = useRestoreActiveTasks();
+  const { data: modelStatusData } = useQuery({
+    queryKey: ['modelStatus'],
+    queryFn: () => apiClient.getModelStatus(),
+    refetchInterval: 15_000,
+  });
 
   return (
     <AppFrame>
@@ -32,7 +39,7 @@ function RootLayout() {
 
       {/* Show download toasts for any active downloads (from anywhere) */}
       {activeDownloads.map((download) => {
-        const displayName = MODEL_DISPLAY_NAMES[download.model_name] || download.model_name;
+        const displayName = getModelDisplayName(download.model_name, modelStatusData?.models);
         return (
           <DownloadToastRestorer
             key={download.model_name}

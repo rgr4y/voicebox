@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 
+from . import model_registry
+
 
 class VoiceProfileCreate(BaseModel):
     """Request model for creating a voice profile."""
@@ -55,7 +57,7 @@ class GenerationRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
     language: str = Field(default="en", pattern="^(zh|en|ja|ko|de|fr|ru|pt|es|it)$")
     seed: Optional[int] = Field(None, ge=0)
-    model_size: Optional[str] = Field(default="1.7B", pattern="^(1\\.7B|0\\.6B)$")
+    model_size: Optional[str] = Field(default=model_registry.DEFAULT_MODEL_SIZE, pattern=model_registry.valid_sizes_pattern())
     instruct: Optional[str] = Field(None, max_length=500)
     request_user_id: Optional[str] = Field(None, max_length=128)
     request_user_first_name: Optional[str] = Field(None, max_length=64)
@@ -193,6 +195,9 @@ class ModelStatus(BaseModel):
     downloading: bool = False  # True if download is in progress
     size_mb: Optional[float] = None
     loaded: bool = False
+    model_type: Optional[str] = None  # "tts" or "whisper"
+    model_size: Optional[str] = None  # size key like "1.7B", "0.6B"
+    description: Optional[str] = None  # "Higher quality", "Faster"
 
 
 class ModelStatusListResponse(BaseModel):

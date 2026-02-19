@@ -688,8 +688,7 @@ def cmd_generate(args):
     elif not sys.stdin.isatty():
         text = sys.stdin.read().strip()
     else:
-        print("Error: provide text via --text, --file, or stdin.", file=sys.stderr)
-        sys.exit(1)
+        args.subparser.error("one of --text, --file, or stdin is required")
 
     if not text:
         print("Error: text is empty.", file=sys.stderr)
@@ -957,7 +956,9 @@ def resolve_profile(base_url, voice_name):
         print("Import one with: voicebox import <file.zip>", file=sys.stderr)
         sys.exit(1)
 
-    # Fall back to last-used voice when none specified
+    # Fall back to last-used voice when none specified.
+    # If last_voice is stale (profile was deleted), the match below will find nothing
+    # and exit with a clear "no voice matching" error listing available profiles.
     if not voice_name:
         voice_name = load_cli_config().get("last_voice")
         if voice_name:
@@ -1040,6 +1041,7 @@ def main():
     p_gen.add_argument("--seed", "-s", type=int, help="Random seed")
     p_gen.add_argument("--instruct", help="Style instruction (e.g. 'speak slowly')")
     p_gen.add_argument("--no-open", action="store_true", help="Don't open file after generating")
+    p_gen.set_defaults(subparser=p_gen)
 
     # health
     sub.add_parser("health", help="Check server status")
