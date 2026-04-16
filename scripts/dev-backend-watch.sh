@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPECTED_VENV="$ROOT_DIR/backend/venv"
 EXPECTED_PY="$EXPECTED_VENV/bin/python"
 PORT="${PORT:-17493}"
+HOST="${HOST:-127.0.0.1}"
 
 # Load .env from voicebox/ then ../ (parent wins on conflicts)
 for env_file in "$ROOT_DIR/.env" "$ROOT_DIR/../.env"; do
@@ -33,8 +34,7 @@ echo "[dev-backend-watch] Using python: $EXPECTED_PY"
 "$EXPECTED_PY" -c 'import sys; print(f"[dev-backend-watch] Python {sys.version.split()[0]}")'
 
 cd "$ROOT_DIR"
-exec "$EXPECTED_PY" -m uvicorn backend.main:app \
-  --host 127.0.0.1 \
+exec "$EXPECTED_PY" -m backend.main \
+  --host "$HOST" \
   --port "$PORT" \
-  --reload \
-  --reload-dir backend
+  --reload

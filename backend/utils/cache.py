@@ -22,13 +22,16 @@ def _get_cache_dir() -> Path:
 _memory_cache: dict[str, Union[torch.Tensor, Dict[str, Any]]] = {}
 
 
-def get_cache_key(audio_path: str, reference_text: str) -> str:
+def get_cache_key(audio_path: str, reference_text: str, model_size: Optional[str] = None) -> str:
     """
     Generate cache key from audio file and reference text.
 
     Args:
         audio_path: Path to audio file
         reference_text: Reference text
+        model_size: Model size (e.g. "1.7B", "0.6B") — included so prompts
+                    cached for one model are not reused for another (tensors
+                    have incompatible hidden dimensions).
 
     Returns:
         Cache key (MD5 hash)
@@ -37,8 +40,10 @@ def get_cache_key(audio_path: str, reference_text: str) -> str:
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
 
-    # Combine audio bytes and text
+    # Combine audio bytes, text, and model size
     combined = audio_bytes + reference_text.encode("utf-8")
+    if model_size is not None:
+        combined += model_size.encode("utf-8")
 
     # Generate hash
     return hashlib.md5(combined).hexdigest()

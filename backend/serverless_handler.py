@@ -12,7 +12,10 @@ Local testing:
 """
 
 import os
-import sys
+
+# Must be set before any backend imports so backends disable idle timers at module load time
+os.environ["SERVERLESS"] = "1"
+
 import time
 import logging
 import threading
@@ -45,10 +48,11 @@ def _start_server():
 
     _server_ready.clear()
 
-    # Set SERVERLESS before importing the app so backends disable idle timers
-    os.environ["SERVERLESS"] = "1"
+    # Configure JSON logging before any imports so all loggers use it from the start
+    from backend.utils.logging_config import configure_json_logging
+    configure_json_logging()
 
-    from backend import config, database
+    from backend import config
     from backend.main import app
 
     config.set_data_dir("/app/data")

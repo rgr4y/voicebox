@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from . import config
+from . import model_registry
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class GenerationJob(Base):
     text = Column(Text, nullable=False)
     language = Column(String, default="en")
     seed = Column(Integer, nullable=True)
-    model_size = Column(String, default="1.7B")
+    model_size = Column(String, default=model_registry.DEFAULT_MODEL_SIZE)
     instruct = Column(Text, nullable=True)
     status = Column(String, default="queued")  # queued | generating | cancelling | complete | cancelled | error | timeout | deleted
     progress = Column(Float, default=0.0)

@@ -46,6 +46,7 @@ data/model_prefs.json
 # Logs
 *.log
 logs/
+!logs/.gitkeep
 
 # Environment
 .env
@@ -53,6 +54,7 @@ logs/
 
 # Generated files
 app/openapi.json
+backend/voicebox-server.spec
 tauri/src-tauri/binaries/*
 
 # Temporary

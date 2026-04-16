@@ -279,10 +279,11 @@ class ProgressManager:
         # Notify listeners (thread-safe)
         self._notify_listeners_threadsafe(model_name, progress_data)
 
-        # Remove the entry after notifying so future subscribers don't see stale
-        # "complete" status from a previous download and close immediately.
+        # Keep the "complete" entry in _progress so that SSE clients who subscribe
+        # after the download finishes still receive a terminal "complete" event and
+        # close immediately (handled in subscribe()).  The entry is naturally
+        # overwritten when a new download for the same model begins.
         with self._lock:
-            self._progress.pop(model_name, None)
             self._last_notify_time.pop(model_name, None)
             self._last_notify_progress.pop(model_name, None)
 

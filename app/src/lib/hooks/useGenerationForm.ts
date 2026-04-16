@@ -1,12 +1,12 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
 import { LANGUAGE_CODES, type LanguageCode } from '@/lib/constants/languages';
 import { useGeneration } from '@/lib/hooks/useGeneration';
-import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
 import { useGenerationStore } from '@/stores/generationStore';
 import { usePlayerStore } from '@/stores/playerStore';
 
@@ -16,7 +16,7 @@ const generationSchema = z.object({
   text: z.string().min(1, 'Text is required').max(5000),
   language: z.enum(LANGUAGE_CODES as [LanguageCode, ...LanguageCode[]]),
   seed: z.number().int().optional(),
-  modelSize: z.enum(['1.7B', '0.6B']).optional(),
+  modelSize: z.string().optional(),
   instruct: z.string().max(500).optional(),
 });
 
@@ -33,14 +33,18 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
   const setAudioWithAutoPlay = usePlayerStore((state) => state.setAudioWithAutoPlay);
   const resetPlayer = usePlayerReset();
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
-  const [downloadingModelName, setDownloadingModelName] = useState<string | null>(null);
-  const [downloadingDisplayName, setDownloadingDisplayName] = useState<string | null>(null);
 
-  useModelDownloadToast({
-    modelName: downloadingModelName || '',
-    displayName: downloadingDisplayName || '',
-    enabled: !!downloadingModelName,
+  // Fetch model status so we can validate/correct the selected model size
+  const { data: modelStatusData } = useQuery({
+    queryKey: ['modelStatus'],
+    queryFn: () => apiClient.getModelStatus(),
+    refetchInterval: 15_000,
   });
+
+  const ttsModels = (modelStatusData?.models ?? []).filter((m) => m.model_type === 'tts');
+  const installedTtsModels = ttsModels.filter((m) => m.downloaded);
+  const installedSizes = installedTtsModels.map((m) => m.model_size).filter(Boolean) as string[];
+  const noModelsInstalled = modelStatusData !== undefined && installedTtsModels.length === 0;
 
   const form = useForm<GenerationFormValues>({
     resolver: zodResolver(generationSchema),
@@ -48,11 +52,20 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       text: '',
       language: 'en',
       seed: undefined,
-      modelSize: '1.7B',
+      modelSize: localStorage.getItem('voicebox:lastModelSize') ?? undefined,
       instruct: '',
       ...options.defaultValues,
     },
   });
+
+  // Correct model size: keep current if installed, else pick first installed
+  useEffect(() => {
+    if (installedSizes.length === 0) return;
+    const current = form.getValues('modelSize');
+    if (!current || !installedSizes.includes(current)) {
+      form.setValue('modelSize', installedSizes[0]);
+    }
+  }, [installedSizes.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleSubmit(
     data: GenerationFormValues,
@@ -71,19 +84,8 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       setIsGenerating(true);
       resetPlayer(); // Close any existing audio player
 
-      const modelName = `qwen-tts-${data.modelSize}`;
-      const displayName = data.modelSize === '1.7B' ? 'Qwen TTS 1.7B' : 'Qwen TTS 0.6B';
-
-      try {
-        const modelStatus = await apiClient.getModelStatus();
-        const model = modelStatus.models.find((m) => m.model_name === modelName);
-
-        if (model && !model.loaded) {
-          setDownloadingModelName(modelName);
-          setDownloadingDisplayName(displayName);
-        }
-      } catch (error) {
-        console.error('Failed to check model status:', error);
+      if (data.modelSize) {
+        localStorage.setItem('voicebox:lastModelSize', data.modelSize);
       }
 
       const result = await generation.mutateAsync({
@@ -103,7 +105,14 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       const audioUrl = apiClient.getAudioUrl(result.id);
       setAudioWithAutoPlay(audioUrl, result.id, selectedProfileId, data.text.substring(0, 50));
 
-      form.reset();
+      // Preserve sticky fields across reset — only clear text/seed/instruct
+      form.reset({
+        text: '',
+        language: form.getValues('language'),
+        seed: undefined,
+        modelSize: form.getValues('modelSize'),
+        instruct: '',
+      });
       options.onSuccess?.(result.id);
     } catch (error) {
       toast({
@@ -113,14 +122,20 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       });
     } finally {
       setIsGenerating(false);
-      setDownloadingModelName(null);
-      setDownloadingDisplayName(null);
     }
   }
+
+  const pendingJobs = useGenerationStore((state) => state.pendingJobs);
+  const isQueueLimitReached = pendingJobs.length >= 3;
 
   return {
     form,
     handleSubmit,
     isPending: generation.isPending,
+    isQueueLimitReached,
+    ttsModels,
+    installedSizes,
+    noModelsInstalled,
+    modelLocked: false,
   };
 }

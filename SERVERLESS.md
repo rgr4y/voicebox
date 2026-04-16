@@ -54,16 +54,18 @@ When creating your endpoint on [runpod.io](https://runpod.io):
 
 ## Authentication
 
-Add your RunPod API key to the root `.env`:
+RunPod validates the API key on incoming requests to your endpoint. The worker itself does not need the key — do not bake it into the Docker image or add it to the worker's environment.
 
-```
-RUNPOD_API_KEY=your_runpod_api_key_here
-```
-
-All requests to the RunPod endpoint require this key as a bearer token:
+Clients calling the endpoint must pass the key as a bearer token:
 
 ```
 Authorization: Bearer $RUNPOD_API_KEY
+```
+
+You can find or create your API key in the [RunPod console](https://www.runpod.io/console/user/settings). Set it in your client environment (e.g. a local `.env` or CI secret) so your request scripts can reference it:
+
+```
+RUNPOD_API_KEY=your_runpod_api_key_here
 ```
 
 ## Sending requests
