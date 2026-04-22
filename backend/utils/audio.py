@@ -125,6 +125,49 @@ def load_audio(
     return audio, sr
 
 
+def trim_leading_silence(
+    audio: np.ndarray,
+    sample_rate: int = 24000,
+    threshold_rms: float = 0.03,
+    window_ms: float = 30.0,
+    pad_ms: float = 30.0,
+) -> np.ndarray:
+    """
+    Remove leading silence from generated audio.
+
+    Uses RMS energy over sliding windows to find speech onset,
+    then trims to pad_ms before that point.
+
+    Args:
+        audio: Audio samples (1D float array)
+        sample_rate: Sample rate in Hz
+        threshold_rms: RMS level that counts as speech
+        window_ms: Analysis window size in ms
+        pad_ms: Silence to preserve before speech onset
+
+    Returns:
+        Trimmed audio array
+    """
+    if len(audio) == 0:
+        return audio
+
+    window = max(1, int(sample_rate * window_ms / 1000))
+    hop = window // 2
+
+    for start in range(0, len(audio) - window, hop):
+        chunk = audio[start:start + window]
+        rms = float(np.sqrt(np.mean(chunk ** 2)))
+        if rms > threshold_rms:
+            pad_samples = int(sample_rate * pad_ms / 1000)
+            cut = max(0, start - pad_samples)
+            if cut > 0:
+                trimmed_ms = cut * 1000 / sample_rate
+                logger.debug(f"Trimmed {trimmed_ms:.0f}ms leading silence")
+            return audio[cut:]
+
+    return audio
+
+
 def save_audio(
     audio: np.ndarray,
     path: str,
@@ -144,6 +187,7 @@ def save_audio(
         sample_rate: Sample rate
         normalize: Apply loudness normalization before saving (default: True)
     """
+    audio = trim_leading_silence(audio, sample_rate=sample_rate)
     if normalize:
         audio = normalize_audio(audio, sample_rate=sample_rate)
     sf.write(path, audio, sample_rate)
