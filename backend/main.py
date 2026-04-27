@@ -5,6 +5,7 @@ Handles voice cloning, generation history, and server mode.
 """
 
 import logging
+import sys
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request, Query
@@ -70,6 +71,9 @@ _cancel_requested_jobs: set[str] = set()
 _MAX_ACTIVE_JOBS_PER_USER = 3
 _QUEUED_JOB_TIMEOUT_MINUTES = 15
 _GENERATING_JOB_TIMEOUT_MINUTES = 5
+
+_AUTO_RESTART_MINUTES = int(os.environ.get("AUTO_RESTART_MINUTES", "0"))
+_tracemalloc_baseline = None
 
 
 def _expire_old_queued_jobs(db: Session):
@@ -2371,6 +2375,47 @@ async def _job_worker():
             await asyncio.sleep(2)
 
 
+async def _auto_restart():
+    """Restart the process after a configured interval to reclaim leaked memory.
+
+    Uses os.execv to replace the process image — fresh interpreter, fresh heap,
+    fresh Metal/CUDA context. Drains any in-flight generation before restarting.
+    Set AUTO_RESTART_MINUTES=15 (or any positive int) to enable.
+    """
+    global _tracemalloc_baseline
+
+    if _AUTO_RESTART_MINUTES <= 0:
+        return
+
+    import tracemalloc
+    tracemalloc.start(25)
+
+    # Let startup/preload settle before taking baseline
+    await asyncio.sleep(60)
+    _tracemalloc_baseline = tracemalloc.take_snapshot()
+    logger.info(f"Auto-restart: baseline snapshot taken, restart in {_AUTO_RESTART_MINUTES - 1}m")
+
+    remaining = (_AUTO_RESTART_MINUTES * 60) - 60
+    if remaining > 0:
+        await asyncio.sleep(remaining)
+
+    logger.info(f"Auto-restart: {_AUTO_RESTART_MINUTES}m elapsed, draining in-flight work...")
+
+    if _tracemalloc_baseline:
+        snapshot = tracemalloc.take_snapshot()
+        top_stats = snapshot.compare_to(_tracemalloc_baseline, 'lineno')
+        logger.info("=== Memory growth (top 20 allocations since baseline) ===")
+        for stat in top_stats[:20]:
+            logger.info(f"  {stat}")
+
+    async with _model_lock:
+        logger.info("Auto-restart: generation drained, restarting process via execv")
+        for handler in logging.root.handlers:
+            handler.flush()
+        restart_args = getattr(sys, 'orig_argv', None) or [sys.executable] + sys.argv
+        os.execv(restart_args[0], restart_args)
+
+
 async def _startup():
     """Run on application startup."""
     from .utils.logging_config import configure_json_logging
@@ -2427,6 +2472,11 @@ async def _startup():
 
     # Start the job worker
     asyncio.create_task(_job_worker())
+
+    # Schedule periodic process restart for memory leak mitigation
+    if _AUTO_RESTART_MINUTES > 0:
+        logger.info(f"Auto-restart enabled: process will restart every {_AUTO_RESTART_MINUTES}m", extra={"subtype": "api"})
+        asyncio.create_task(_auto_restart())
 
 
 async def _preload_models():

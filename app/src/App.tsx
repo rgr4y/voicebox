@@ -33,10 +33,13 @@ const LOADING_MESSAGES = [
   'Initializing Qwen TTS framework...',
 ];
 
+type StartupPhase = 'checking' | 'starting' | 'ready';
+
 function App() {
   const platform = usePlatform();
   const [serverReady, setServerReady] = useState(false);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
+  const [startupPhase, setStartupPhase] = useState<StartupPhase>('checking');
   const serverStartingRef = useRef(false);
 
   // Automatically check for app updates on startup and show toast notifications
@@ -120,6 +123,7 @@ function App() {
     tryExistingServer().then((alreadyRunning) => {
       if (alreadyRunning) return;
 
+      setStartupPhase('starting');
       console.log('Production mode: Starting bundled server...');
       platform.lifecycle
         .startServer(false)
@@ -182,7 +186,7 @@ function App() {
               className="w-48 h-48 object-contain animate-fade-in-scale relative z-10"
             />
           </div>
-          <div className="animate-fade-in-delayed">
+          <div className="animate-fade-in-delayed space-y-2">
             <ShinyText
               text={LOADING_MESSAGES[loadingMessageIndex]}
               className="text-lg font-medium text-muted-foreground"
@@ -190,6 +194,10 @@ function App() {
               color="hsl(var(--muted-foreground))"
               shineColor="hsl(var(--foreground))"
             />
+            <p className="text-xs text-muted-foreground/50 tabular-nums">
+              {startupPhase === 'checking' && 'Checking for running server…'}
+              {startupPhase === 'starting' && 'Starting server…'}
+            </p>
           </div>
         </div>
       </div>
