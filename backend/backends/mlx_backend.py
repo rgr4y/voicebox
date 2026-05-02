@@ -339,6 +339,7 @@ class MLXTTSBackend:
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
         progress_callback: Optional[callable] = None,
+        audio_chunk_callback: Optional[callable] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio from text using voice prompt.
@@ -350,6 +351,8 @@ class MLXTTSBackend:
             seed: Random seed for reproducibility
             instruct: Natural language instruction (may not be supported by MLX)
             progress_callback: Optional callback(progress_pct: float) where 0.0-100.0
+            audio_chunk_callback: Optional callback(audio_chunk, sample_rate) called per
+                streaming chunk. Enables stream=True for lower first-audio latency.
 
         Returns:
             Tuple of (audio_array, sample_rate)
@@ -402,10 +405,21 @@ class MLXTTSBackend:
             def _process_results(generator):
                 """Collect audio chunks from model generator."""
                 nonlocal chunk_count, sample_rate
+                is_first_chunk = True
                 for result in generator:
-                    audio_chunks.append(np.array(result.audio))
+                    chunk = np.array(result.audio)
                     sample_rate = result.sample_rate
                     chunk_count += 1
+
+                    if audio_chunk_callback:
+                        if is_first_chunk:
+                            from ..utils.audio import trim_leading_silence
+                            chunk = trim_leading_silence(chunk, sample_rate=sample_rate)
+                            is_first_chunk = False
+                        if len(chunk) > 0:
+                            audio_chunk_callback(chunk, sample_rate)
+
+                    audio_chunks.append(chunk)
                     if progress_callback:
                         pct = min(95.0, (chunk_count / estimated_chunks) * 100.0)
                         progress_callback(pct)
@@ -413,14 +427,17 @@ class MLXTTSBackend:
                         elapsed = _time.perf_counter() - gen_start
                         logger.debug(f"[TTS] Chunk {chunk_count} generated ({elapsed:.1f}s elapsed)")
 
+            use_streaming = audio_chunk_callback is not None
+            stream_kwargs = dict(stream=True, streaming_interval=1.0) if use_streaming else {}
+
             # Generate with or without voice cloning
             try:
                 if ref_audio is not None:
                     import inspect
                     sig = inspect.signature(self.model.generate)
                     if "ref_audio" in sig.parameters:
-                        logger.debug(f"[TTS] Starting voice-cloned generation (ref_text: \"{ref_text[:50]}...\")")
-                        _process_results(self.model.generate(text, ref_audio=ref_audio, ref_text=ref_text))
+                        logger.debug(f"[TTS] Starting voice-cloned generation (ref_text: \"{ref_text[:50]}...\", streaming={use_streaming})")
+                        _process_results(self.model.generate(text, ref_audio=ref_audio, ref_text=ref_text, **stream_kwargs))
                     else:
                         logger.debug("[TTS] Starting generation (model doesn't support ref_audio)")
                         _process_results(self.model.generate(text))

@@ -831,6 +831,7 @@ async def generate_speech(
             )
             audio, sample_rate = await tts_model.generate(
                 data.text, voice_prompt, data.language, data.seed, data.instruct,
+                audio_chunk_callback=_enqueue_playback if play else None,
             )
         generation_time_seconds = (datetime.utcnow() - generation_started_at).total_seconds()
 
@@ -839,9 +840,6 @@ async def generate_speech(
         duration = len(audio) / sample_rate
         audio_path = config.get_generations_dir() / f"{job_id}.wav"
         save_audio(audio, str(audio_path), sample_rate)
-
-        if play:
-            _enqueue_playback(audio, sample_rate)
 
         generation = await history.create_generation(
             profile_id=data.profile_id,

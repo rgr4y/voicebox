@@ -337,6 +337,7 @@ class PyTorchTTSBackend:
         seed: Optional[int] = None,
         instruct: Optional[str] = None,
         progress_callback: Optional[callable] = None,
+        audio_chunk_callback: Optional[callable] = None,
     ) -> Tuple[np.ndarray, int]:
         """
         Generate audio from text using voice prompt.
