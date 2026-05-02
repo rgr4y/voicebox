@@ -25,14 +25,34 @@ import httpx
 import runpod
 import uvicorn
 
+# Set up JSON logging FIRST, before any backend imports that might log
+from backend.utils.logging_config import configure_json_logging
+configure_json_logging()
 logger = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────
-_HOST = "127.0.0.1"
-_PORT = 17493
-_BASE_URL = f"http://{_HOST}:{_PORT}"
-_STARTUP_TIMEOUT = 300  # 5 min max for cold start model downloads
-_STARTUP_POLL = 2  # seconds between health checks
+from backend.constants import (
+    build_base_url,
+    DATA_DIR,
+    ENV_SERVERLESS,
+    HEALTH_PATH,
+    SERVERLESS_BINARY_CONTENT_TYPES,
+    SERVERLESS_HEALTHCHECK_TIMEOUT_SECONDS,
+    SERVERLESS_HTTP_METHOD_DEFAULT,
+    SERVERLESS_JSON_METHODS,
+    SERVERLESS_MISSING_PATH_MESSAGE,
+    SERVERLESS_REQUEST_TIMEOUT_SECONDS,
+    SERVERLESS_STARTUP_POLL_SECONDS,
+    SERVERLESS_STARTUP_TIMEOUT_SECONDS,
+    VOICEBOX_PORT,
+    WILDCARD_HOST,
+)
+
+_HOST = WILDCARD_HOST
+_PORT = VOICEBOX_PORT
+_BASE_URL = build_base_url(_HOST, _PORT)
+_STARTUP_TIMEOUT = SERVERLESS_STARTUP_TIMEOUT_SECONDS
+_STARTUP_POLL = SERVERLESS_STARTUP_POLL_SECONDS
 
 # ── Server lifecycle ──────────────────────────────────────────
 _server_ready = threading.Event()
@@ -48,17 +68,13 @@ def _start_server():
 
     _server_ready.clear()
 
-    # Configure JSON logging before any imports so all loggers use it from the start
-    from backend.utils.logging_config import configure_json_logging
-    configure_json_logging()
-
     from backend import config
     from backend.main import app
 
-    config.set_data_dir("/app/data")
+    config.set_data_dir(DATA_DIR)
 
     def _run():
-        uvicorn.run(app, host=_HOST, port=_PORT, log_level="info")
+        uvicorn.run(app, host=_HOST, port=_PORT, log_level="info", log_config=None)
 
     _server_thread = threading.Thread(target=_run, daemon=True)
     _server_thread.start()
@@ -72,7 +88,7 @@ def _wait_for_server():
     deadline = time.time() + _STARTUP_TIMEOUT
     while time.time() < deadline:
         try:
-            r = httpx.get(f"{_BASE_URL}/health", timeout=5)
+            r = httpx.get(f"{_BASE_URL}{HEALTH_PATH}", timeout=5)
             if r.status_code == 200:
                 logger.info("Voicebox server is ready")
                 _server_ready.set()
@@ -106,9 +122,9 @@ def handler(job: dict) -> dict:
 
     path = inp.get("path")
     if not path:
-        return {"error": "Missing 'path' in job input"}
+        return {"error": SERVERLESS_MISSING_PATH_MESSAGE}
 
-    method = inp.get("method", "POST").upper()
+    method = inp.get("method", SERVERLESS_HTTP_METHOD_DEFAULT).upper()
     body = inp.get("body")
     params = inp.get("params")
     headers = inp.get("headers", {})
@@ -116,21 +132,17 @@ def handler(job: dict) -> dict:
     url = f"{_BASE_URL}{path}"
 
     try:
-        with httpx.Client(timeout=600) as client:
+        with httpx.Client(timeout=SERVERLESS_REQUEST_TIMEOUT_SECONDS) as client:
             response = client.request(
                 method=method,
                 url=url,
-                json=body if method in ("POST", "PUT", "PATCH") else None,
+                json=body if method in SERVERLESS_JSON_METHODS else None,
                 params=params,
                 headers=headers,
             )
 
         content_type = response.headers.get("content-type", "")
-        is_binary = (
-            "audio/" in content_type
-            or "application/octet-stream" in content_type
-            or "application/zip" in content_type
-        )
+        is_binary = any(ct in content_type for ct in SERVERLESS_BINARY_CONTENT_TYPES)
 
         if is_binary:
             return {
@@ -152,7 +164,7 @@ def handler(job: dict) -> dict:
         }
 
     except httpx.TimeoutException:
-        return {"error": "Request to voicebox server timed out (600s)"}
+        return {"error": f"Request to voicebox server timed out ({SERVERLESS_REQUEST_TIMEOUT_SECONDS}s)"}
     except Exception as e:
         return {"error": f"Request failed: {e}"}
 

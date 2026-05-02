@@ -84,16 +84,25 @@ class PyTorchTTSBackend:
             from huggingface_hub import constants as hf_constants
             model_path = self._get_model_path(model_size)
             repo_cache = Path(hf_constants.HF_HUB_CACHE) / ("models--" + model_path.replace("/", "--"))
-            
+
+            logger.info(f"[_is_model_cached] size={model_size} hf_repo={model_path} cache_dir={hf_constants.HF_HUB_CACHE} repo_cache={repo_cache} exists={repo_cache.exists()}")
+
             if not repo_cache.exists():
+                # Show what IS in the cache dir for debugging
+                cache_parent = Path(hf_constants.HF_HUB_CACHE)
+                if cache_parent.exists():
+                    contents = list(cache_parent.iterdir())
+                    logger.info(f"[_is_model_cached] cache dir contents: {[p.name for p in contents]}")
+                else:
+                    logger.info(f"[_is_model_cached] cache dir {cache_parent} does not exist")
                 return False
-            
+
             # Check for .incomplete files - if any exist, download is still in progress
             blobs_dir = repo_cache / "blobs"
             if blobs_dir.exists() and any(blobs_dir.glob("*.incomplete")):
-                logger.debug(f"[_is_model_cached] Found .incomplete files for {model_size}, treating as not cached")
+                logger.info(f"[_is_model_cached] Found .incomplete files for {model_size}, treating as not cached")
                 return False
-            
+
             # Check that actual model weight files exist in snapshots
             snapshots_dir = repo_cache / "snapshots"
             if snapshots_dir.exists():
@@ -102,9 +111,9 @@ class PyTorchTTSBackend:
                     any(snapshots_dir.rglob("*.bin"))
                 )
                 if not has_weights:
-                    logger.debug(f"[_is_model_cached] No model weights found for {model_size}, treating as not cached")
+                    logger.info(f"[_is_model_cached] No model weights in {snapshots_dir}, treating as not cached")
                     return False
-            
+
             return True
         except Exception as e:
             logger.warning(f"[_is_model_cached] Error checking cache for {model_size}: {e}")
@@ -145,7 +154,7 @@ class PyTorchTTSBackend:
         try:
             progress_manager = get_progress_manager()
             task_manager = get_task_manager()
-            model_name = f"qwen-tts-{model_size}"
+            model_name = model_registry.get_model_name(model_size)
 
             # Set up progress callback and tracker
             # If cached: filter out non-download progress (like "Segment 1/1" during generation)
@@ -209,7 +218,7 @@ class PyTorchTTSBackend:
             logger.error(f"Error: qwen_tts package not found. Install with: pip install git+https://github.com/QwenLM/Qwen3-TTS.git")
             progress_manager = get_progress_manager()
             task_manager = get_task_manager()
-            model_name = f"qwen-tts-{model_size}"
+            model_name = model_registry.get_model_name(model_size)
             progress_manager.mark_error(model_name, str(e))
             task_manager.error_download(model_name, str(e))
             raise
@@ -218,7 +227,7 @@ class PyTorchTTSBackend:
             logger.info(f"Tip: The model will be automatically downloaded from HuggingFace Hub on first use.")
             progress_manager = get_progress_manager()
             task_manager = get_task_manager()
-            model_name = f"qwen-tts-{model_size}"
+            model_name = model_registry.get_model_name(model_size)
             progress_manager.mark_error(model_name, str(e))
             task_manager.error_download(model_name, str(e))
             raise

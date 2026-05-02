@@ -10,16 +10,44 @@ from pathlib import Path
 
 import requests
 
-DEFAULT_URL = "http://127.0.0.1:17493"
-SERVER_BIN = "/Applications/Voicebox.app/Contents/MacOS/voicebox-server"
-DEFAULT_DATA_DIR = Path.home() / "Library/Application Support/sh.voicebox.app"
+from .constants import (
+    AUDIO_PATH_TEMPLATE,
+    CLI_API_TIMEOUT_SECONDS,
+    CLI_DEFAULT_DATA_DIR,
+    CLI_FILE_TRANSFER_TIMEOUT_SECONDS,
+    CLI_HEALTHCHECK_TIMEOUT_SECONDS,
+    CLI_LOG_FILENAME,
+    CLI_PID_FILENAME,
+    CLI_SERVER_BIN,
+    CLI_SERVER_READY_POLL_COUNT,
+    CLI_SERVER_READY_POLL_SECONDS,
+    CLI_STREAM_PROGRESS_TIMEOUT_SECONDS,
+    CLI_STREAM_START_TIMEOUT_SECONDS,
+    DEFAULT_LANGUAGE,
+    GENERATE_PROGRESS_PATH_TEMPLATE,
+    GENERATE_STREAM_PATH,
+    HEALTH_PATH,
+    HISTORY_PATH,
+    JOB_STATUS_COMPLETE,
+    JOB_STATUS_ERROR,
+    LATEST_HISTORY_RESULT_LIMIT,
+    LOCALHOST,
+    PROFILES_IMPORT_PATH,
+    PROFILES_PATH,
+    VOICEBOX_PORT_DEFAULT,
+    build_base_url,
+)
+
+DEFAULT_URL = build_base_url(LOCALHOST, VOICEBOX_PORT_DEFAULT)
+SERVER_BIN = CLI_SERVER_BIN
+DEFAULT_DATA_DIR = CLI_DEFAULT_DATA_DIR
 
 
 # --- API helpers ---
 
 def api(method, base_url, path, **kwargs):
     """Make an API call with consistent error handling."""
-    kwargs.setdefault("timeout", 30)
+    kwargs.setdefault("timeout", CLI_API_TIMEOUT_SECONDS)
     try:
         resp = getattr(requests, method)(f"{base_url}{path}", **kwargs)
     except requests.ConnectionError:
@@ -38,8 +66,8 @@ def api(method, base_url, path, **kwargs):
 
 # --- Subcommands ---
 
-PID_FILE = Path.home() / ".voicebox.pid"
-LOG_FILE = Path.home() / ".voicebox.log"
+PID_FILE = Path.home() / CLI_PID_FILENAME
+LOG_FILE = Path.home() / CLI_LOG_FILENAME
 
 
 def cmd_server(args):
@@ -84,16 +112,16 @@ def cmd_server(args):
         )
         PID_FILE.write_text(str(proc.pid))
         print(f"Waiting for server (pid {proc.pid}, port {port})...", end="", flush=True)
-        url = f"http://127.0.0.1:{port}/health"
-        for _ in range(60):
-            time.sleep(0.5)
+        url = f"{build_base_url(LOCALHOST, int(port))}{HEALTH_PATH}"
+        for _ in range(CLI_SERVER_READY_POLL_COUNT):
+            time.sleep(CLI_SERVER_READY_POLL_SECONDS)
             if proc.poll() is not None:
                 print(" failed.")
                 print(f"Server exited. Check log: {LOG_FILE}", file=sys.stderr)
                 PID_FILE.unlink(missing_ok=True)
                 sys.exit(1)
             try:
-                r = requests.get(url, timeout=2)
+                r = requests.get(url, timeout=CLI_HEALTHCHECK_TIMEOUT_SECONDS)
                 if r.status_code == 200:
                     print(" ready.")
                     print(f"Stop with: voicebox server --stop")
@@ -132,7 +160,7 @@ def _stop_server():
 
 def cmd_voices(args):
     """List all voice profiles."""
-    resp = api("get", args.url, "/profiles")
+    resp = api("get", args.url, PROFILES_PATH)
     profiles = resp.json()
     if not profiles:
         print("No voice profiles found. Import one with: voicebox import <file.zip>")
@@ -152,9 +180,9 @@ def cmd_import(args):
 
     print(f"Importing {zip_path.name}...")
     with open(zip_path, "rb") as f:
-        resp = api("post", args.url, "/profiles/import",
+        resp = api("post", args.url, PROFILES_IMPORT_PATH,
                     files={"file": (zip_path.name, f, "application/zip")},
-                    timeout=60)
+                    timeout=CLI_FILE_TRANSFER_TIMEOUT_SECONDS)
     profile = resp.json()
     print(f"Imported: {profile['name']} ({profile['id']})")
 
@@ -185,7 +213,7 @@ def cmd_generate(args):
     payload = {
         "profile_id": profile["id"],
         "text": text,
-        "language": args.language or profile.get("language", "en"),
+        "language": args.language or profile.get("language", DEFAULT_LANGUAGE),
     }
     if args.seed is not None:
         payload["seed"] = args.seed
@@ -196,15 +224,15 @@ def cmd_generate(args):
     start = time.time()
 
     # Use streaming mode — start generation asynchronously
-    resp = api("post", args.url, "/generate?stream=true", json=payload, timeout=10)
+    resp = api("post", args.url, GENERATE_STREAM_PATH, json=payload, timeout=CLI_STREAM_START_TIMEOUT_SECONDS)
     start_data = resp.json()
     generation_id = start_data["generation_id"]
 
     # Stream progress via SSE
     progress_resp = requests.get(
-        f"{args.url}/generate/progress/{generation_id}",
+        f"{args.url}{GENERATE_PROGRESS_PATH_TEMPLATE.format(generation_id=generation_id)}",
         stream=True,
-        timeout=300,
+        timeout=CLI_STREAM_PROGRESS_TIMEOUT_SECONDS,
     )
 
     final_data = None
@@ -224,20 +252,26 @@ def cmd_generate(args):
             bar = "#" * filled + "-" * (bar_len - filled)
             print(f"\r[{bar}] {pct:.0f}%", end="", flush=True)
 
-            if status in ("complete", "error"):
+            if status in (JOB_STATUS_COMPLETE, JOB_STATUS_ERROR):
                 print()  # newline after progress bar
                 final_data = data
                 break
 
     elapsed = time.time() - start
 
-    if final_data and final_data.get("status") == "error":
+    if final_data and final_data.get("status") == JOB_STATUS_ERROR:
         error_msg = final_data.get("error", "Unknown error")
         print(f"Generation failed: {error_msg}", file=sys.stderr)
         sys.exit(1)
 
     # Fetch latest history entry to get the generation result
-    history_resp = api("get", args.url, "/history", params={"limit": 1}, timeout=10)
+    history_resp = api(
+        "get",
+        args.url,
+        HISTORY_PATH,
+        params={"limit": LATEST_HISTORY_RESULT_LIMIT},
+        timeout=CLI_STREAM_START_TIMEOUT_SECONDS,
+    )
     history_data = history_resp.json()
     if history_data["items"]:
         result = history_data["items"][0]
@@ -249,7 +283,12 @@ def cmd_generate(args):
     # Download wav then convert to m4a
     tag = str(int(time.time()))[-5:]
     wav_path = f"output_{tag}.wav"
-    dl = api("get", args.url, f"/audio/{result['id']}", timeout=60)
+    dl = api(
+        "get",
+        args.url,
+        AUDIO_PATH_TEMPLATE.format(generation_id=result["id"]),
+        timeout=CLI_FILE_TRANSFER_TIMEOUT_SECONDS,
+    )
     Path(wav_path).write_bytes(dl.content)
 
     if not shutil.which("ffmpeg"):
@@ -274,7 +313,7 @@ def cmd_generate(args):
 
 def cmd_health(args):
     """Check server health."""
-    resp = api("get", args.url, "/health")
+    resp = api("get", args.url, HEALTH_PATH)
     h = resp.json()
     print(f"Status:       {h['status']}")
     print(f"Model loaded: {h['model_loaded']}")
@@ -287,7 +326,7 @@ def cmd_health(args):
 # --- Profile resolution (shared) ---
 
 def resolve_profile(base_url, voice_name):
-    resp = api("get", base_url, "/profiles")
+    resp = api("get", base_url, PROFILES_PATH)
     profiles = resp.json()
     if not profiles:
         print("Error: no voice profiles found.", file=sys.stderr)
@@ -335,7 +374,7 @@ def main():
 
     # server
     p_server = sub.add_parser("server", help="Start the backend server")
-    p_server.add_argument("--port", type=int, default=17493, help="Port (default: 17493)")
+    p_server.add_argument("--port", type=int, default=VOICEBOX_PORT_DEFAULT, help=f"Port (default: {VOICEBOX_PORT_DEFAULT})")
     p_server.add_argument("--data-dir", help="Data directory")
     p_server.add_argument("-d", "--detach", action="store_true", help="Run in background (daemon)")
     p_server.add_argument("--stop", action="store_true", help="Stop a detached server")

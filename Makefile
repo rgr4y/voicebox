@@ -58,8 +58,6 @@ setup-python: $(VENV)/bin/activate ## Set up Python virtual environment and depe
 		$(PIP) install -r /tmp/voicebox-requirements-filtered.txt; \
 		rm /tmp/voicebox-requirements-filtered.txt; \
 		$(PIP) install --no-deps git+https://github.com/QwenLM/Qwen3-TTS.git; \
-		# --no-deps is intentional: qwen-tts deps conflict with mlx-audio's pinned transformers. \
-		# All required deps are already installed via requirements.txt + requirements-mlx.txt. \
 		echo -e "$(GREEN)✓ MLX backend enabled (native Metal acceleration)$(NC)"; \
 		echo -e "$(YELLOW)Note: Using transformers 5.0.0rc3 (required by MLX)$(NC)"; \
 	else \
@@ -85,14 +83,12 @@ $(VENV)/bin/activate:
 		PYENV_PY=$$(echo $$HOME/.pyenv/versions/3.12.*/bin/python3.12 | tr ' ' '\n' | sort -V | tail -1); \
 		if [ -x "$$PYENV_PY" ]; then \
 			echo -e "$(BLUE)Using pyenv Python 3.12 with --copies (Docker-compatible)...$(NC)"; \
-			echo -e "$(YELLOW)  $$PYENV_PY$(NC)"; \
 			$$PYENV_PY -m venv --copies $(VENV); \
 		elif command -v python3.12 >/dev/null 2>&1; then \
 			echo -e "$(BLUE)Using system python3.12 with --copies...$(NC)"; \
 			python3.12 -m venv --copies $(VENV); \
 		else \
 			echo -e "$(YELLOW)Warning: Python 3.12 not found, using default $(PYTHON)$(NC)"; \
-			echo -e "$(YELLOW)  Install via: pyenv install 3.12.12$(NC)"; \
 			$(PYTHON) -m venv --copies $(VENV); \
 		fi; \
 	else \
@@ -148,7 +144,7 @@ kill-dev: ## Kill all development processes
 # BUILD
 # =============================================================================
 
-.PHONY: build build-server build-tauri build-web
+.PHONY: build build-server build-tauri build-web docker-cuda docker-cpu docker-runpod
 
 build: build-server build-tauri ## Build everything (server binary + desktop app)
 	@echo -e "$(GREEN)✓ Build complete!$(NC)"
@@ -165,6 +161,15 @@ build-web: ## Build web app
 	@echo -e "$(BLUE)Building web app...$(NC)"
 	cd $(WEB_DIR) && bun run build
 	@echo -e "$(GREEN)✓ Web build output in $(WEB_DIR)/dist/$(NC)"
+
+docker-cuda: ## Build Docker image (GPU/CUDA)
+	DOCKER_BUILDKIT=1 docker build -t voicebox .
+
+docker-cpu: ## Build Docker image (CPU-only)
+	DOCKER_BUILDKIT=1 docker build --build-arg CUDA=0 -t voicebox-cpu .
+
+docker-runpod: ## Build Docker image (RunPod serverless)
+	DOCKER_BUILDKIT=1 docker build --build-arg SERVERLESS=1 -t voicebox-serverless .
 
 # =============================================================================
 # DATABASE & API

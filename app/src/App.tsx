@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from 'react';
 import voiceboxLogo from '@/assets/voicebox-logo.png';
 import ShinyText from '@/components/ShinyText';
 import { TitleBarDragRegion } from '@/components/TitleBarDragRegion';
-import { useAutoUpdater } from '@/hooks/useAutoUpdater';
 import { TOP_SAFE_AREA_PADDING } from '@/lib/constants/ui';
 import { cn } from '@/lib/utils/cn';
 import { usePlatform } from '@/platform/PlatformContext';
@@ -41,9 +40,6 @@ function App() {
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
   const [startupPhase, setStartupPhase] = useState<StartupPhase>('checking');
   const serverStartingRef = useRef(false);
-
-  // Automatically check for app updates on startup and show toast notifications
-  useAutoUpdater({ checkOnMount: true, showToast: true });
 
   // Sync stored setting to Rust on startup
   useEffect(() => {

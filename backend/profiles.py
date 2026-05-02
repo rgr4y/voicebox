@@ -32,6 +32,17 @@ def _get_profiles_dir() -> Path:
     return config.get_profiles_dir()
 
 
+def _resolve_sample_path(audio_path: str) -> str:
+    """Resolve sample path — if relative, prepend data_dir."""
+    p = Path(audio_path)
+    if p.is_absolute() and p.exists():
+        return audio_path
+    resolved = config.get_data_dir() / audio_path
+    if resolved.exists():
+        return str(resolved)
+    return audio_path
+
+
 async def create_profile(
     data: VoiceProfileCreate,
     db: Session,
@@ -274,7 +285,7 @@ async def delete_profile_sample(
     profile_id = sample.profile_id
     
     # Delete audio file
-    audio_path = Path(sample.audio_path)
+    audio_path = Path(_resolve_sample_path(sample.audio_path))
     if audio_path.exists():
         audio_path.unlink()
     
@@ -351,14 +362,14 @@ async def create_voice_prompt_for_profile(
         # Single sample - use directly
         sample = samples[0]
         voice_prompt, _ = await tts_model.create_voice_prompt(
-            sample.audio_path,
+            _resolve_sample_path(sample.audio_path),
             sample.reference_text,
             use_cache=use_cache,
         )
         return voice_prompt
     else:
         # Multiple samples - combine them
-        audio_paths = [s.audio_path for s in samples]
+        audio_paths = [_resolve_sample_path(s.audio_path) for s in samples]
         reference_texts = [s.reference_text for s in samples]
 
         # Combine audio

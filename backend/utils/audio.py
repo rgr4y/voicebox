@@ -193,200 +193,7 @@ def save_audio(
     sf.write(path, audio, sample_rate)
 
 
-def trim_tts_output(
-    audio: np.ndarray,
-    sample_rate: int = 24000,
-    frame_ms: int = 20,
-    silence_threshold_db: float = -40.0,
-    min_silence_ms: int = 200,
-    max_internal_silence_ms: int = 1000,
-    fade_ms: int = 30,
-) -> np.ndarray:
-    """
-    Trim trailing silence and post-silence hallucination from TTS output.
-
-    Chatterbox sometimes produces ``[speech][silence][hallucinated noise]``.
-    This detects internal silence gaps longer than *max_internal_silence_ms*
-    and cuts the audio at that boundary, then trims trailing silence and
-    applies a short cosine fade-out.
-
-    Args:
-        audio: Input audio array (mono float32)
-        sample_rate: Sample rate in Hz
-        frame_ms: Frame size for RMS energy calculation
-        silence_threshold_db: dB threshold below which a frame is silence
-        min_silence_ms: Minimum trailing silence to keep
-        max_internal_silence_ms: Cut after any silence gap longer than this
-        fade_ms: Cosine fade-out duration in ms
-
-    Returns:
-        Trimmed audio array
-    """
-    frame_len = int(sample_rate * frame_ms / 1000)
-    if frame_len == 0 or len(audio) < frame_len:
-        return audio
-
-    n_frames = len(audio) // frame_len
-    threshold_linear = 10 ** (silence_threshold_db / 20)
-
-    # Compute per-frame RMS
-    rms = np.array(
-        [
-            np.sqrt(np.mean(audio[i * frame_len : (i + 1) * frame_len] ** 2))
-            for i in range(n_frames)
-        ]
-    )
-    is_speech = rms >= threshold_linear
-
-    # Find first speech frame
-    first_speech = 0
-    for i, s in enumerate(is_speech):
-        if s:
-            first_speech = max(0, i - 1)  # keep 1 frame padding
-            break
-
-    # Walk forward from first speech; cut at long internal silence gaps
-    max_silence_frames = int(max_internal_silence_ms / frame_ms)
-    consecutive_silence = 0
-    cut_frame = n_frames
-
-    for i in range(first_speech, n_frames):
-        if is_speech[i]:
-            consecutive_silence = 0
-        else:
-            consecutive_silence += 1
-            if consecutive_silence >= max_silence_frames:
-                cut_frame = i - consecutive_silence + 1
-                break
-
-    # Trim trailing silence from the cut point
-    min_silence_frames = int(min_silence_ms / frame_ms)
-    end_frame = cut_frame
-    while end_frame > first_speech and not is_speech[end_frame - 1]:
-        end_frame -= 1
-    # Keep a short tail
-    end_frame = min(end_frame + min_silence_frames, cut_frame)
-
-    # Convert frames back to samples
-    start_sample = first_speech * frame_len
-    end_sample = min(end_frame * frame_len, len(audio))
-
-    trimmed = audio[start_sample:end_sample].copy()
-
-    # Cosine fade-out
-    fade_samples = int(sample_rate * fade_ms / 1000)
-    if fade_samples > 0 and len(trimmed) > fade_samples:
-        fade = np.cos(np.linspace(0, np.pi / 2, fade_samples)) ** 2
-        trimmed[-fade_samples:] *= fade
-
-    return trimmed
-
-
-def preprocess_reference_audio(
-    audio: np.ndarray,
-    sample_rate: int,
-    peak_target: float = 0.95,
-    trim_top_db: float = 40.0,
-    edge_padding_ms: int = 100,
-) -> np.ndarray:
-    """
-    Clean up a reference-audio sample before validation/storage.
-
-    Removes DC offset, trims leading/trailing silence, and caps the peak so a
-    slightly-hot recording doesn't get rejected downstream as "clipping". The
-    goal is to accept reasonable real-world recordings — not to repair badly
-    distorted ones. True clipping artifacts inside the waveform can't be
-    recovered by peak scaling and will still sound bad.
-
-    Args:
-        audio: Mono audio array.
-        sample_rate: Sample rate of ``audio`` in Hz.
-        peak_target: Peak amplitude cap in [0, 1]. Applied only if the input
-            peak exceeds this value.
-        trim_top_db: Silence threshold for edge trimming, in dB below peak.
-            40 dB sits below normal speech dynamic range (≈30 dB) so soft
-            trailing syllables are preserved, while still catching obvious
-            leading/trailing silence. Lower values are more aggressive;
-            librosa's own default is 60.
-        edge_padding_ms: Milliseconds of padding to add back at each edge
-            *only if* trimming shortened the waveform, so TTS engines have a
-            brief silence to anchor on without ever making the output longer
-            than the input.
-
-    Returns:
-        Preprocessed audio array (float32).
-    """
-    audio = audio.astype(np.float32, copy=False)
-
-    if audio.size == 0:
-        return audio
-
-    audio = audio - float(np.mean(audio))
-
-    trimmed, _ = librosa.effects.trim(audio, top_db=trim_top_db)
-    if 0 < trimmed.size < audio.size:
-        pad_each = int(sample_rate * edge_padding_ms / 1000)
-        # Never pad past the original length — for near-max-duration uploads
-        # an unconditional pad would push them over the 30 s ceiling and
-        # trigger a spurious "too long" rejection.
-        headroom = (audio.size - trimmed.size) // 2
-        pad = min(pad_each, max(headroom, 0))
-        if pad > 0:
-            trimmed = np.pad(trimmed, (pad, pad), mode="constant")
-        audio = trimmed
-
-    peak = float(np.abs(audio).max())
-    if peak > peak_target and peak > 0:
-        audio = audio * (peak_target / peak)
-
-    return audio
-
-
-def validate_and_load_reference_audio(
-    audio_path: str,
-    min_duration: float = 2.0,
-    max_duration: float = 30.0,
-    trim_threshold: float = 45.0,
-    min_rms: float = 0.01,
-) -> Tuple[bool, Optional[str], Optional[np.ndarray], Optional[int]]:
-    """
-    Validate and load reference audio in a single pass.
-
-    Applies preprocessing before checks so slightly-hot recordings pass
-    without changing existing loudness-normalization behavior elsewhere.
-    """
-    try:
-        audio, sr = load_audio(audio_path)
-        audio = preprocess_reference_audio(audio, sr)
-        duration = len(audio) / sr
-
-        if duration < min_duration:
-            return False, f"Audio too short ({duration:.1f}s, minimum {min_duration}s)", None, None
-
-        if duration > max_duration:
-            if duration <= trim_threshold:
-                max_samples = int(max_duration * sr)
-                audio = audio[:max_samples]
-                duration = max_duration
-            else:
-                return (
-                    False,
-                    f"Audio too long ({duration:.1f}s, maximum {max_duration}s). "
-                    f"Clips up to {trim_threshold:.0f}s are auto-trimmed.",
-                    None,
-                    None,
-                )
-
-        rms = np.sqrt(np.mean(audio**2))
-        if rms < min_rms:
-            return False, "Audio is too quiet or silent", None, None
-
-        return True, None, audio, sr
-    except Exception as e:
-        return False, f"Error processing audio: {str(e)}", None, None
-
-
-def validate_reference_audio(
+def validate_and_normalize_reference_audio(
     audio_path: str,
     min_duration: float = 2.0,
     max_duration: float = 30.0,
@@ -394,12 +201,17 @@ def validate_reference_audio(
     min_rms: float = 0.01,
 ) -> Tuple[bool, Optional[str]]:
     """
-    Validate reference audio for voice cloning.
+    Validate, auto-trim, and normalize reference audio for voice cloning.
+
+    Does the heavy lifting so users don't have to manually prepare audio:
+    - Clips slightly over max_duration are auto-trimmed (up to trim_threshold)
+    - Audio is loudness-normalized to broadcast standards (EBU R128)
+    - The old peak > 0.99 "clipping" rejection is gone entirely
 
     Args:
         audio_path: Path to audio file (will be overwritten with processed version)
         min_duration: Minimum duration in seconds
-        max_duration: Maximum duration in seconds (inclusive - 30.0s is allowed)
+        max_duration: Maximum duration in seconds (inclusive — 30.0s is allowed)
         trim_threshold: Auto-trim clips up to this length to max_duration.
             Clips longer than this are rejected outright.
         min_rms: Minimum RMS level (below this = silence)
@@ -407,21 +219,42 @@ def validate_reference_audio(
     Returns:
         Tuple of (is_valid, error_message)
     """
-    ok, err, audio, sr = validate_and_load_reference_audio(
-        audio_path=audio_path,
-        min_duration=min_duration,
-        max_duration=max_duration,
-        trim_threshold=trim_threshold,
-        min_rms=min_rms,
-    )
-    if not ok or audio is None or sr is None:
-        return ok, err
+    try:
+        audio, sr = load_audio(audio_path)
+        duration = len(audio) / sr
 
-    # Keep existing behavior: normalize + overwrite validated reference input.
-    audio = normalize_audio(audio, sample_rate=sr)
-    sf.write(audio_path, audio, sr)
-    return True, None
+        if duration < min_duration:
+            return False, f"Audio too short ({duration:.1f}s, minimum {min_duration}s)"
+
+        # Auto-trim clips that are over max_duration but within trim_threshold
+        if duration > max_duration:
+            if duration <= trim_threshold:
+                # Trim to max_duration — take the first N seconds
+                max_samples = int(max_duration * sr)
+                audio = audio[:max_samples]
+                logger.info(
+                    "Auto-trimmed reference audio from %.1fs to %.1fs",
+                    duration, max_duration,
+                )
+                duration = max_duration
+            else:
+                return False, (
+                    f"Audio too long ({duration:.1f}s, maximum {max_duration}s). "
+                    f"Clips up to {trim_threshold:.0f}s are auto-trimmed."
+                )
+
+        rms = np.sqrt(np.mean(audio ** 2))
+        if rms < min_rms:
+            return False, "Audio is too quiet or silent"
+
+        # Normalize to consistent loudness (EBU R128, -16 LUFS)
+        audio = normalize_audio(audio, sample_rate=sr)
+        sf.write(audio_path, audio, sr)
+
+        return True, None
+    except Exception as e:
+        return False, f"Error processing audio: {str(e)}"
 
 
 # Keep old name as alias for backward compatibility
-validate_and_normalize_reference_audio = validate_reference_audio
+validate_reference_audio = validate_and_normalize_reference_audio
