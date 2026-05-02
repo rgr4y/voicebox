@@ -122,6 +122,26 @@ _cancel_requested_jobs: set[str] = set()
 _AUTO_RESTART_MINUTES = int(os.environ.get(ENV_AUTO_RESTART_MINUTES, str(AUTO_RESTART_MINUTES_DEFAULT)))
 _tracemalloc_baseline = None
 
+# Server-side audio playback queue (for play=true on /generate)
+import queue as _queue_mod
+_playback_queue = _queue_mod.Queue()
+
+def _playback_worker():
+    import sounddevice as sd
+    while True:
+        samples, sr = _playback_queue.get()
+        try:
+            sd.play(samples, sr)
+            sd.wait()
+        except Exception as e:
+            logger.warning(f"Playback failed: {e}")
+
+import threading as _threading
+_threading.Thread(target=_playback_worker, daemon=True).start()
+
+def _enqueue_playback(samples, sample_rate):
+    _playback_queue.put((samples, sample_rate))
+
 
 def _expire_old_queued_jobs(db: Session):
     """Expire queued jobs that have sat too long without starting."""
@@ -681,6 +701,7 @@ async def generate_speech(
     data: models.GenerationRequest,
     request: Request,
     stream: bool = False,
+    play: bool = False,
     db: Session = Depends(get_db),
 ):
     """Generate speech from text using a voice profile.
@@ -799,6 +820,9 @@ async def generate_speech(
         audio_path = config.get_generations_dir() / f"{job_id}.wav"
         from .utils.audio import save_audio
         save_audio(audio, str(audio_path), sample_rate)
+
+        if play:
+            _enqueue_playback(audio, sample_rate)
 
         generation = await history.create_generation(
             profile_id=data.profile_id,

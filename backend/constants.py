@@ -49,9 +49,17 @@ def build_base_url(host: str, port: int) -> str:
 
 
 # Filesystem defaults
-VOICEBOX_DATA_DIR_DEFAULT = "/runpod-volume/voicebox"
-HF_HOME_DEFAULT = "/runpod-volume/huggingface-cache"
+_IS_SERVERLESS = os.environ.get("SERVERLESS", "0") == "1"
+_LOCAL_DATA_DIR = Path.home() / "Library/Application Support/sh.voicebox.app"
 HF_HOME_SUBDIR = "huggingface"
+VOICEBOX_DATA_DIR_DEFAULT = (
+    "/runpod-volume/voicebox" if _IS_SERVERLESS
+    else str(_LOCAL_DATA_DIR)
+)
+HF_HOME_DEFAULT = (
+    "/runpod-volume/huggingface-cache" if _IS_SERVERLESS
+    else str(_LOCAL_DATA_DIR / HF_HOME_SUBDIR)
+)
 DATABASE_FILENAME = "voicebox.db"
 MODEL_PREFS_FILENAME = "model_prefs.json"
 PROFILES_SUBDIR = "profiles"
@@ -59,7 +67,7 @@ GENERATIONS_SUBDIR = "generations"
 CACHE_SUBDIR = "cache"
 MODELS_SUBDIR = "models"
 APP_LOG_FILENAME = "app.log"
-CLI_DEFAULT_DATA_DIR = Path.home() / "Library/Application Support/sh.voicebox.app"
+CLI_DEFAULT_DATA_DIR = _LOCAL_DATA_DIR
 CLI_SERVER_BIN = "/Applications/Voicebox.app/Contents/MacOS/voicebox-server"
 CLI_PID_FILENAME = ".voicebox.pid"
 CLI_LOG_FILENAME = ".voicebox.log"
