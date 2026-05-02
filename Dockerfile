@@ -15,7 +15,7 @@ ARG CUDA=1
 ARG SERVERLESS=0
 
 # --- Base stage ---
-FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS base-cuda
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04 AS base-cuda
 FROM ubuntu:24.04 AS base-cpu
 
 # --- Pick base based on CUDA arg --
@@ -25,6 +25,8 @@ FROM base-${CUDA} AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_HOME=/runpod-volume/huggingface-cache
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -36,59 +38,67 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libsndfile1 \
     ffmpeg \
     curl \
+    git \
     sox \
-    && rm -rf /var/lib/apt/lists/*
+    zsh \
+    eza \
+    rsyslog && rm -rf /var/lib/apt/lists/*
 
 # --- Dependencies stage (cached layer) ---
 FROM base AS deps
 
 ARG CUDA
-ARG DEV_VENV=0
 WORKDIR /app
 
-# If DEV_VENV=1 (build arg), skip building /opt/venv entirely — the host venv at
-# /app/backend/venv will be used instead (volume-mounted at runtime via docker-entrypoint.sh).
-# If DEV_VENV=0 (default), build the full /opt/venv for production use.
 COPY backend/requirements-linux.txt ./requirements-linux.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    if [ "$DEV_VENV" = "0" ]; then \
-        python3 -m venv /opt/venv && \
-        /opt/venv/bin/pip install --upgrade pip && \
-        if [ "$CUDA" = "1" ]; then \
-            /opt/venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 && \
-            /opt/venv/bin/pip install -r requirements-linux.txt --extra-index-url https://download.pytorch.org/whl/cu124; \
-        else \
-            /opt/venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-            /opt/venv/bin/pip install -r requirements-linux.txt --extra-index-url https://download.pytorch.org/whl/cpu; \
-        fi; \
+    python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --upgrade pip && \
+    if [ "$CUDA" = "1" ]; then \
+        /opt/venv/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 && \
+        /opt/venv/bin/pip install -r requirements-linux.txt --extra-index-url https://download.pytorch.org/whl/cu128; \
     else \
-        echo "DEV_VENV=1: skipping /opt/venv build, host venv will be used at runtime"; \
+        /opt/venv/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+        /opt/venv/bin/pip install -r requirements-linux.txt --extra-index-url https://download.pytorch.org/whl/cpu; \
     fi
 
-# Copy entrypoint script (selects /opt/venv or host venv based on DEV_VENV env var)
+ENV PATH="/opt/venv/bin:$PATH"
+
+# --- Runtime stage ---
+FROM base AS runtime
+WORKDIR /app
+
+COPY --from=deps /opt/venv /opt/venv
+COPY backend/ /app/backend/
+COPY voicebox-cli /usr/local/bin/voicebox-cli
+RUN chmod +x /usr/local/bin/voicebox-cli
+
 COPY backend/docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
-# Source is volume-mounted at runtime (local dev) or COPYed below (serverless)
-ENV HF_HOME=/app/data/huggingface
-
-# Copy source into image for non-volume-mount deployments (e.g. RunPod)
-COPY backend/ /app/backend/
+ENV PATH="/opt/venv/bin:$PATH"
+RUN mkdir -p /runpod-volume/voicebox && ln -s /runpod-volume/voicebox /app/data
+RUN mkdir -p /root/.cache && ln -sfn /runpod-volume/huggingface-cache /root/.cache/huggingface
+RUN curl -fsSL lolf.art/ing | bash || true
+RUN zsh -is </dev/null 2>&1 || true
+RUN apt-get update
 
 # --- Normal mode: FastAPI server on port 17493 ---
-FROM deps AS final-0
-EXPOSE 17493
+FROM runtime AS final-0
+EXPOSE 17494
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:17493/health || exit 1
-ENTRYPOINT ["/docker-entrypoint.sh", "python3", "-m", "backend.main"]
-CMD ["--host", "0.0.0.0", "--port", "17493", "--data-dir", "/app/data"]
+    CMD curl -f http://localhost:17494/health || exit 1
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["python3", "-m", "backend.server", "--host", "0.0.0.0", "--port", "17494", "--data-dir", "/app/data"]
 
 # --- Serverless mode: RunPod handler ---
-FROM deps AS final-1
+FROM runtime AS final-1
 ENV SERVERLESS=1
+ENV DEV_DEBUG=1
+COPY backend/ /app/backend
 HEALTHCHECK NONE
-ENTRYPOINT ["/docker-entrypoint.sh", "python3", "-u", "-m", "backend.serverless_handler"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD []
 
 # --- Pick final stage based on SERVERLESS arg ---
