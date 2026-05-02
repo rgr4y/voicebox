@@ -1,5 +1,5 @@
 import { Link, useRouterState } from '@tanstack/react-router';
-import { Box, BookOpen, Loader2, Mic, Server, Speaker, Volume2 } from 'lucide-react';
+import { BookOpen, Box, Loader2, Server, Speaker, Volume2 } from 'lucide-react';
 import voiceboxLogo from '@/assets/voicebox-logo.png';
 import { cn } from '@/lib/utils/cn';
 import { usePlatform } from '@/platform/PlatformContext';
@@ -13,7 +13,6 @@ interface SidebarProps {
 const allTabs = [
   { id: 'main', path: '/', icon: Volume2, label: 'Generate', tauriOnly: false },
   { id: 'stories', path: '/stories', icon: BookOpen, label: 'Stories', tauriOnly: false },
-  { id: 'voices', path: '/voices', icon: Mic, label: 'Voices', tauriOnly: false },
   { id: 'audio', path: '/audio', icon: Speaker, label: 'Audio', tauriOnly: true },
   { id: 'models', path: '/models', icon: Box, label: 'Models', tauriOnly: false },
   { id: 'server', path: '/server', icon: Server, label: 'Server', tauriOnly: false },
@@ -45,9 +44,7 @@ export function Sidebar({ isMacOS }: SidebarProps) {
         {tabs.map((tab) => {
           const Icon = tab.icon;
           // For index route, use exact match; for others, use default matching
-          const isActive = tab.path === '/'
-            ? pathname === '/'
-            : pathname.startsWith(tab.path);
+          const isActive = tab.path === '/' ? pathname === '/' : pathname.startsWith(tab.path);
 
           return (
             <Link

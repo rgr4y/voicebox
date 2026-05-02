@@ -816,9 +816,10 @@ async def generate_speech(
             )
         generation_time_seconds = (datetime.utcnow() - generation_started_at).total_seconds()
 
+        from .utils.audio import save_audio, trim_leading_silence
+        audio = trim_leading_silence(audio, sample_rate=sample_rate)
         duration = len(audio) / sample_rate
         audio_path = config.get_generations_dir() / f"{job_id}.wav"
-        from .utils.audio import save_audio
         save_audio(audio, str(audio_path), sample_rate)
 
         if play:
