@@ -21,7 +21,7 @@ TTS_MODELS: dict[str, dict] = {
         "display_name": "Qwen TTS 1.7B",
         "description": "Higher quality",
         "hf_repo": {
-            "pytorch": "qwen/qwen3-tts-12hz-1.7b-base",
+            "pytorch": "AMAImedia/Qwen3-1.7B-TTS-Cross-Darwin-NOESIS-AWQ-INT4",
             "mlx": "mlx-community/qwen3-tts-12hz-1.7b-base-4bit",
         },
     },

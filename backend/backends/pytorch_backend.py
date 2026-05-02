@@ -192,13 +192,37 @@ class PyTorchTTSBackend:
 
             # Patch tqdm; pass local_files_only when cached to skip remote validation
             with tracker.patch_download():
-                from qwen_tts import Qwen3TTSModel
+                # autoawq 0.2.9 imports `PytorchGELUTanh` which was renamed to
+                # `GELUTanh` in transformers 4.57. Alias it so awq imports succeed.
+                import transformers.activations as _tf_acts
+                if not hasattr(_tf_acts, "PytorchGELUTanh") and hasattr(_tf_acts, "GELUTanh"):
+                    _tf_acts.PytorchGELUTanh = _tf_acts.GELUTanh
 
-                dtype = torch.float32 if self.device == "cpu" else torch.bfloat16
-                load_kwargs = dict(
-                    device_map=self.device,
-                    torch_dtype=dtype,
-                )
+                from qwen_tts import Qwen3TTSModel
+                import inspect
+                from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSSpeakerEncoderConfig
+                _orig_sec_init = Qwen3TTSSpeakerEncoderConfig.__init__
+                _sec_params = set(inspect.signature(_orig_sec_init).parameters) - {"self"}
+                Qwen3TTSSpeakerEncoderConfig.__init__ = lambda self, **kw: _orig_sec_init(self, **{k: v for k, v in kw.items() if k in _sec_params})
+
+                # qwen_tts model holds dict_keys views that break deepcopy in
+                # transformers' AWQ pre-processing; the AWQ model's quantization_config
+                # already specifies what to skip, so returning [] is safe.
+                import transformers.integrations.bitsandbytes as _bnb_int
+                _orig_get_keys = _bnb_int.get_keys_to_not_convert
+                def _safe_get_keys(model):
+                    try:
+                        return _orig_get_keys(model)
+                    except Exception:
+                        return []
+                _bnb_int.get_keys_to_not_convert = _safe_get_keys
+
+                if self.device == "cpu":
+                    dtype = torch.float32
+                    load_kwargs = dict(device_map=self.device, torch_dtype=dtype)
+                else:
+                    load_kwargs = dict(device_map=self.device, torch_dtype=torch.bfloat16)
+
                 if is_cached:
                     load_kwargs["local_files_only"] = True
                 self.model = Qwen3TTSModel.from_pretrained(model_path, **load_kwargs)
