@@ -123,20 +123,38 @@ _AUTO_RESTART_MINUTES = int(os.environ.get(ENV_AUTO_RESTART_MINUTES, str(AUTO_RE
 _tracemalloc_baseline = None
 
 # Server-side audio playback queue (for play=true on /generate)
+# Uses a persistent OutputStream so back-to-back clips play seamlessly.
 import queue as _queue_mod
+import threading as _threading
 _playback_queue = _queue_mod.Queue()
 
 def _playback_worker():
     import sounddevice as sd
+    import numpy as np
+    stream = None
+    stream_sr = None
     while True:
         samples, sr = _playback_queue.get()
         try:
-            sd.play(samples, sr)
-            sd.wait()
+            if samples.ndim == 1:
+                samples = samples.reshape(-1, 1)
+            samples = samples.astype(np.float32)
+            if stream is None or stream_sr != sr or not stream.active:
+                if stream is not None:
+                    stream.close()
+                stream = sd.OutputStream(samplerate=sr, channels=samples.shape[1], dtype='float32')
+                stream.start()
+                stream_sr = sr
+            stream.write(samples)
         except Exception as e:
             logger.warning(f"Playback failed: {e}")
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+                stream = None
 
-import threading as _threading
 _threading.Thread(target=_playback_worker, daemon=True).start()
 
 def _enqueue_playback(samples, sample_rate):
