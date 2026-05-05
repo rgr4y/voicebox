@@ -20,6 +20,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -714,6 +715,30 @@ def cmd_generate(args):
     print(f"Generating with voice '{profile['name']}'...")
     start = time.time()
 
+    if args.play:
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{args.url}/generate?play=true",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        err_box = [None]
+        def _fire():
+            try:
+                urllib.request.urlopen(req, timeout=300)
+            except Exception as e:
+                err_box[0] = e
+
+        t = threading.Thread(target=_fire, daemon=True)
+        t.start()
+        t.join(timeout=2)
+        if err_box[0]:
+            print(f"Error: {err_box[0]}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Playing via server ({profile['name']})")
+        return
+
     # Queue the job asynchronously
     _, start_data = api("POST", args.url, "/generate?stream=true", json_body=payload, timeout=30)
     generation_id = start_data.get("generation_id")
@@ -1037,6 +1062,7 @@ def main():
     p_gen.add_argument("--language", "-l", help="Language code")
     p_gen.add_argument("--seed", "-s", type=int, help="Random seed")
     p_gen.add_argument("--instruct", help="Style instruction (e.g. 'speak slowly')")
+    p_gen.add_argument("--play", "-p", action="store_true", help="Server-side playback (no file saved)")
     p_gen.add_argument("--no-open", action="store_true", help="Don't open file after generating")
     p_gen.add_argument("words", nargs="*", help="Text to speak (positional, alternative to --text)")
     p_gen.set_defaults(subparser=p_gen)

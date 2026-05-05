@@ -42,12 +42,11 @@ from ..utils.idle_timer import IdleTimer
 # Idle timeouts (seconds). Disabled in serverless mode — the entire
 # worker shuts down instead of unloading individual models.
 _SERVERLESS = os.environ.get("SERVERLESS", "") in ("1", "true")
-_TTS_IDLE_TIMEOUT = 0 if _SERVERLESS else 180   # 3 minutes (normal)
-_STT_IDLE_TIMEOUT = 0 if _SERVERLESS else 300   # 5 minutes (normal)
+_TTS_IDLE_TIMEOUT = 0 if _SERVERLESS else 300
+_STT_IDLE_TIMEOUT = 0 if _SERVERLESS else 180
 
 # Global load lock — prevents concurrent MLX model loads which cause Metal crashes.
 _MLX_LOAD_LOCK = threading.Lock()
-
 
 class MLXTTSBackend:
     """MLX-based TTS backend using mlx-audio."""

@@ -2554,8 +2554,8 @@ async def _startup():
 
 async def _preload_models():
     """Preload TTS model at startup if PRELOAD_MODELS=1."""
-    if os.environ.get(ENV_PRELOAD_MODELS, "") not in ("1", "true"):
-        logger.info("Model preload skipped (set PRELOAD_MODELS=1 to enable)")
+    if os.environ.get(ENV_PRELOAD_MODELS, "") in ("0", "false"):
+        logger.info("Model preload skipped (PRELOAD_MODELS=0 is set)")
         return
 
     prefs = _load_model_prefs()
