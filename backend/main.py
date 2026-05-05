@@ -88,6 +88,7 @@ import signal
 
 from . import database, models, profiles, history, tts, transcribe, config, export_import, channels, stories, __version__
 from .database import get_db, Generation as DBGeneration, GenerationJob as DBGenerationJob, VoiceProfile as DBVoiceProfile
+from .utils.generate_watchdog import record_generate_success
 from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
@@ -857,6 +858,10 @@ async def generate_speech(
             request_ip=request_ip,
             generation_time_seconds=generation_time_seconds,
         )
+        try:
+            record_generate_success(str(getattr(generation, "id", job_id)))
+        except Exception as e:
+            logger.warning(f"Failed to record generate watchdog success: {e}")
         task_manager.complete_generation(job_id)
         return generation
 
@@ -2412,6 +2417,10 @@ async def _job_worker():
                     job_row.completed_at = datetime.utcnow()
                     gen_db.commit()
 
+                try:
+                    record_generate_success(str(getattr(generation, "id", job_id)))
+                except Exception as e:
+                    logger.warning(f"Failed to record generate watchdog success: {e}")
                 progress_manager.mark_complete(job_id)
                 task_manager.complete_generation(job_id)
                 _cancel_requested_jobs.discard(job_id)
