@@ -11,71 +11,77 @@ multiprocessing.freeze_support()
 import os
 import sys
 import logging
+import argparse
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.constants import API_BIND_PORT_DEFAULT, LOCALHOST
 
-# Set up JSON logging FIRST, before any imports that might fail
-from backend.utils.logging_config import configure_json_logging
-configure_json_logging()
-logger = logging.getLogger(__name__)
 
-# Log startup immediately to confirm binary execution
-logger.info("=" * 60)
-logger.info("voicebox-server starting up...")
-logger.info(f"Python version: {sys.version}")
-logger.info(f"Executable: {sys.executable}")
-logger.info(f"Arguments: {sys.argv}")
-logger.info("=" * 60)
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="voicebox backend server")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=LOCALHOST,
+        help="Host to bind to (use 0.0.0.0 for remote access)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=API_BIND_PORT_DEFAULT,
+        help="Port to bind to",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Data directory for database, profiles, and generated audio",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Also write JSON logs to this file",
+    )
+    return parser.parse_args(argv)
 
-try:
-    logger.info("Importing argparse...")
-    import argparse
-    logger.info("Importing uvicorn...")
-    import uvicorn
-    logger.info("Standard library imports successful")
 
-    # Import the FastAPI app from the backend package
-    logger.info("Importing backend.config...")
-    from backend import config
-    logger.info("Importing backend.database...")
-    from backend import database
-    logger.info("Importing backend.main (this may take a while due to torch/transformers)...")
-    from backend.main import app
-    logger.info("Backend imports successful")
-except Exception as e:
-    logger.error(f"Failed to import required modules: {e}", exc_info=True)
-    sys.exit(1)
+def _main():
+    args = _parse_args()
 
-if __name__ == "__main__":
+    # Set up JSON logging after argparse so help/errors stay human-readable.
+    from backend.utils.logging_config import configure_json_logging
+    configure_json_logging()
+    logger = logging.getLogger(__name__)
+
+    # Log startup immediately to confirm binary execution
+    logger.info("=" * 60)
+    logger.info("voicebox-server starting up...")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Executable: {sys.executable}")
+    logger.info(f"Arguments: {sys.argv}")
+    logger.info("=" * 60)
+
     try:
-        parser = argparse.ArgumentParser(description="voicebox backend server")
-        parser.add_argument(
-            "--host",
-            type=str,
-            default=LOCALHOST,
-            help="Host to bind to (use 0.0.0.0 for remote access)",
-        )
-        parser.add_argument(
-            "--port",
-            type=int,
-            default=API_BIND_PORT_DEFAULT,
-            help="Port to bind to",
-        )
-        parser.add_argument(
-            "--data-dir",
-            type=str,
-            default=None,
-            help="Data directory for database, profiles, and generated audio",
-        )
-        parser.add_argument(
-            "--log-file",
-            type=str,
-            default=None,
-            help="Also write JSON logs to this file",
-        )
-        # Use parse_known_args to tolerate extra args from multiprocessing
-        # resource tracker (-B -S -I -c ...) on PyInstaller bundles
-        args, _unknown = parser.parse_known_args()
+        logger.info("Importing uvicorn...")
+        import uvicorn
+        logger.info("Standard library imports successful")
+
+        # Import the FastAPI app from the backend package
+        logger.info("Importing backend.config...")
+        from backend import config
+        logger.info("Importing backend.database...")
+        from backend import database
+        logger.info("Importing backend.main (this may take a while due to torch/transformers)...")
+        from backend.main import app
+        logger.info("Backend imports successful")
+    except Exception as e:
+        logger.error(f"Failed to import required modules: {e}", exc_info=True)
+        sys.exit(1)
+
+    try:
         logger.info(f"Parsed arguments: host={args.host}, port={args.port}, data_dir={args.data_dir}")
 
         # Set up log file if requested
@@ -105,3 +111,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Server startup failed: {e}", exc_info=True)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    _main()
